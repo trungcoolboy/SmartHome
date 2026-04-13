@@ -1,0 +1,15 @@
+[Unit]
+Description=STM32 #03 Serial Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/trungcoolboy/smart-home/backend
+ExecStart=/usr/bin/python3 /home/trungcoolboy/smart-home/backend/stm32_bridge.py --board-id stm32-03 --device /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG01OQ9Q-if00-port0 --baudrate 115200 --port 8083
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
