@@ -34,6 +34,11 @@ unsigned long last_wifi_begin_ms = 0;
 unsigned long last_mqtt_attempt_ms = 0;
 bool wifi_begin_called = false;
 bool time_configured = false;
+bool telemetry_dirty = false;
+bool state_dirty = false;
+const char* pending_event = "state_sync";
+const char* pending_channel_key = nullptr;
+const char* pending_detail = nullptr;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -90,11 +95,21 @@ void apply_channel_output(ChannelState& channel) {
   update_leds();
 }
 
-void publish_availability(const char* value) {
-  mqtt_client.publish(NodeConfig::kAvailabilityTopic, value, true);
+bool publish_availability(const char* value) {
+  if (!mqtt_client.connected()) {
+    return false;
+  }
+  if (!mqtt_client.publish(NodeConfig::kAvailabilityTopic, value, true)) {
+    Serial.println("mqtt publish availability failed");
+    return false;
+  }
+  return true;
 }
 
-void publish_state(const char* event, const char* channel_key = nullptr, const char* detail = nullptr) {
+bool publish_state_now(const char* event, const char* channel_key = nullptr, const char* detail = nullptr) {
+  if (!mqtt_client.connected()) {
+    return false;
+  }
   JsonDocument doc;
   doc["nodeId"] = NodeConfig::kNodeId;
   doc["event"] = event;
@@ -116,10 +131,24 @@ void publish_state(const char* event, const char* channel_key = nullptr, const c
 
   char payload[320];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
-  mqtt_client.publish(NodeConfig::kStateTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
+  if (!mqtt_client.publish(NodeConfig::kStateTopic, reinterpret_cast<const uint8_t*>(payload), len, false)) {
+    Serial.printf("mqtt publish state failed len=%u\n", static_cast<unsigned>(len));
+    return false;
+  }
+  return true;
 }
 
-void publish_telemetry() {
+void queue_state(const char* event, const char* channel_key = nullptr, const char* detail = nullptr) {
+  pending_event = event;
+  pending_channel_key = channel_key;
+  pending_detail = detail;
+  state_dirty = true;
+}
+
+bool publish_telemetry_now() {
+  if (!mqtt_client.connected()) {
+    return false;
+  }
   JsonDocument doc;
   doc["nodeId"] = NodeConfig::kNodeId;
   doc["uptimeMs"] = millis();
@@ -137,7 +166,11 @@ void publish_telemetry() {
 
   char payload[384];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
-  mqtt_client.publish(NodeConfig::kTelemetryTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
+  if (!mqtt_client.publish(NodeConfig::kTelemetryTopic, reinterpret_cast<const uint8_t*>(payload), len, false)) {
+    Serial.printf("mqtt publish telemetry failed len=%u\n", static_cast<unsigned>(len));
+    return false;
+  }
+  return true;
 }
 
 void setup_ota() {
@@ -147,17 +180,17 @@ void setup_ota() {
   }
 
   ArduinoOTA.onStart([]() {
-    publish_state("ota_start");
+    queue_state("ota_start");
   });
 
   ArduinoOTA.onEnd([]() {
-    publish_state("ota_end");
+    queue_state("ota_end");
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
     char detail[24];
     snprintf(detail, sizeof(detail), "code_%u", static_cast<unsigned>(error));
-    publish_state("ota_error", nullptr, detail);
+    queue_state("ota_error", nullptr, detail);
   });
 
   ArduinoOTA.begin();
@@ -175,7 +208,8 @@ ChannelState* find_channel(const char* key) {
 void set_channel(ChannelState& channel, bool on, const char* event) {
   channel.relay_on = on;
   apply_channel_output(channel);
-  publish_state(event, channel.key, on ? "on" : "off");
+  telemetry_dirty = true;
+  queue_state(event, channel.key, on ? "on" : "off");
 }
 
 void toggle_channel(ChannelState& channel, const char* event) {
@@ -188,13 +222,13 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
   JsonDocument doc;
   const auto err = deserializeJson(doc, payload, length);
   if (err) {
-    publish_state("bad_json", nullptr, err.c_str());
+    queue_state("bad_json", nullptr, err.c_str());
     return;
   }
 
   const char* action = doc["action"] | "";
   if (strcmp(action, "ping") == 0) {
-    publish_state("pong");
+    queue_state("pong");
     return;
   }
 
@@ -202,7 +236,7 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
     const char* channel_key = doc["channel"] | "";
     ChannelState* channel = find_channel(channel_key);
     if (!channel) {
-      publish_state("unknown_channel", channel_key);
+      queue_state("unknown_channel", channel_key);
       return;
     }
     set_channel(*channel, doc["value"] | false, "relay_updated");
@@ -213,14 +247,33 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
     const char* channel_key = doc["channel"] | "";
     ChannelState* channel = find_channel(channel_key);
     if (!channel) {
-      publish_state("unknown_channel", channel_key);
+      queue_state("unknown_channel", channel_key);
       return;
     }
     toggle_channel(*channel, "relay_toggled");
     return;
   }
 
-  publish_state("unknown_action", nullptr, action);
+  queue_state("unknown_action", nullptr, action);
+}
+
+void flush_pending_mqtt() {
+  if (!mqtt_client.connected()) {
+    return;
+  }
+
+  if (state_dirty) {
+    if (publish_state_now(pending_event, pending_channel_key, pending_detail)) {
+      state_dirty = false;
+    }
+  }
+
+  if (telemetry_dirty || (millis() - last_telemetry_ms) >= NodeConfig::kTelemetryIntervalMs) {
+    if (publish_telemetry_now()) {
+      telemetry_dirty = false;
+      last_telemetry_ms = millis();
+    }
+  }
 }
 
 void ensure_wifi() {
@@ -251,6 +304,9 @@ void ensure_mqtt() {
 
   mqtt_client.setServer(NodeConfig::kMqttHost, NodeConfig::kMqttPort);
   mqtt_client.setCallback(handle_command);
+  mqtt_client.setBufferSize(512);
+  mqtt_client.setKeepAlive(15);
+  mqtt_client.setSocketTimeout(1);
   const bool connected =
       strlen(NodeConfig::kMqttUsername) == 0
           ? mqtt_client.connect(NodeConfig::kNodeId, NodeConfig::kAvailabilityTopic, 1, true, "offline")
@@ -266,7 +322,8 @@ void ensure_mqtt() {
   if (connected) {
     publish_availability("online");
     mqtt_client.subscribe(NodeConfig::kCommandTopic);
-    publish_state("mqtt_connected");
+    queue_state("mqtt_connected");
+    telemetry_dirty = true;
   }
 }
 
@@ -321,9 +378,9 @@ void setup() {
   ensure_time();
   setup_ota();
   ensure_mqtt();
-  publish_state("boot_complete");
-  publish_telemetry();
-  last_telemetry_ms = millis();
+  queue_state("boot_complete");
+  telemetry_dirty = true;
+  flush_pending_mqtt();
   last_status_log_ms = millis();
 }
 
@@ -335,13 +392,9 @@ void loop() {
   mqtt_client.loop();
   poll_touch_inputs();
   update_leds();
+  flush_pending_mqtt();
 
   const unsigned long now = millis();
-  if (now - last_telemetry_ms >= NodeConfig::kTelemetryIntervalMs) {
-    publish_telemetry();
-    last_telemetry_ms = now;
-  }
-
   if (now - last_status_log_ms >= 1000) {
     last_status_log_ms = now;
     Serial.printf(

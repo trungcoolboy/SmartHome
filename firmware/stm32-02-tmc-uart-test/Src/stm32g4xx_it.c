@@ -60,8 +60,6 @@
 
 /* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
-extern UART_HandleTypeDef huart2;
-
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -147,11 +145,6 @@ void SysTick_Handler(void)
 void USART1_IRQHandler(void)
 {
   HAL_UART_IRQHandler(&huart1);
-}
-
-void USART3_IRQHandler(void)
-{
-  HAL_UART_IRQHandler(&huart2);
 }
 
 /* USER CODE BEGIN 1 */

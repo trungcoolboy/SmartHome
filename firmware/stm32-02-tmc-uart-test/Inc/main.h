@@ -1,9 +1,9 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @file    UART/UART_Printf/Inc/stm32g4xx_it.h
+  * @file    UART/UART_Printf/Inc/main.h
   * @author  MCD Application Team
-  * @brief   This file contains the headers of the interrupt handlers.
+  * @brief   Header for main.c module
   ******************************************************************************
   * @attention
   *
@@ -19,16 +19,19 @@
 /* USER CODE END Header */
 
 /* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __STM32G4xx_IT_H
-#define __STM32G4xx_IT_H
+#ifndef __MAIN_H
+#define __MAIN_H
 
 #ifdef __cplusplus
- extern "C" {
+extern "C" {
 #endif
+
+/* Includes ------------------------------------------------------------------*/
+#include "stm32g4xx_hal.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -47,19 +50,40 @@
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
-void NMI_Handler(void);
-void HardFault_Handler(void);
-void SVC_Handler(void);
-void PendSV_Handler(void);
-void SysTick_Handler(void);
-void USART1_IRQHandler(void);
-void USART3_IRQHandler(void);
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
+void Error_Handler(void);
+
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */
+
+/* Private defines -----------------------------------------------------------*/
+#define LED2_Pin GPIO_PIN_5
+#define LED2_GPIO_Port GPIOA
+
+#define A_STEP_Pin GPIO_PIN_0
+#define A_STEP_GPIO_Port GPIOB
+#define A_DIR_Pin GPIO_PIN_1
+#define A_DIR_GPIO_Port GPIOB
+#define AB_EN_Pin GPIO_PIN_2
+#define AB_EN_GPIO_Port GPIOB
+#define B_STEP_Pin GPIO_PIN_10
+#define B_STEP_GPIO_Port GPIOB
+#define B_DIR_Pin GPIO_PIN_11
+#define B_DIR_GPIO_Port GPIOB
+
+#define TMC_UART_TX_Pin GPIO_PIN_10
+#define TMC_UART_TX_GPIO_Port GPIOB
+#define TMC_UART_RX_Pin GPIO_PIN_11
+#define TMC_UART_RX_GPIO_Port GPIOB
+
+/* USER CODE BEGIN Private defines */
+
+/* USER CODE END Private defines */
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __STM32G4xx_IT_H */
+#endif /* __MAIN_H */
