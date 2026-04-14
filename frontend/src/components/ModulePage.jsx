@@ -13,6 +13,8 @@ function ModulePage({ page, alertFeed }) {
   const [bridgeError, setBridgeError] = useState("");
   const [roomNodeState, setRoomNodeState] = useState(null);
   const [roomNodeError, setRoomNodeError] = useState("");
+  const [roomNodeSecondaryState, setRoomNodeSecondaryState] = useState(null);
+  const [roomNodeSecondaryError, setRoomNodeSecondaryError] = useState("");
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
@@ -32,6 +34,9 @@ function ModulePage({ page, alertFeed }) {
   const roomNodeReconnectTimerRef = useRef(null);
   const roomNodeStatusTimerRef = useRef(null);
   const roomNodeCardRef = useRef(null);
+  const roomNodeSecondaryReconnectTimerRef = useRef(null);
+  const roomNodeSecondaryStatusTimerRef = useRef(null);
+  const roomNodeSecondaryCardRef = useRef(null);
   const sectionRefs = useRef({});
 
   function clampVolume(value) {
@@ -90,6 +95,14 @@ function ModulePage({ page, alertFeed }) {
       window.clearInterval(roomNodeStatusTimerRef.current);
       roomNodeStatusTimerRef.current = null;
     }
+    if (roomNodeSecondaryReconnectTimerRef.current) {
+      window.clearTimeout(roomNodeSecondaryReconnectTimerRef.current);
+      roomNodeSecondaryReconnectTimerRef.current = null;
+    }
+    if (roomNodeSecondaryStatusTimerRef.current) {
+      window.clearInterval(roomNodeSecondaryStatusTimerRef.current);
+      roomNodeSecondaryStatusTimerRef.current = null;
+    }
   }
 
   function getFeaturedBaseUrl() {
@@ -119,6 +132,13 @@ function ModulePage({ page, alertFeed }) {
       return "";
     }
     return getApiBaseUrl(page.roomNode.apiPath);
+  }
+
+  function getRoomNodeSecondaryBaseUrl() {
+    if (!page.roomNodeSecondary?.apiPath) {
+      return "";
+    }
+    return getApiBaseUrl(page.roomNodeSecondary.apiPath);
   }
 
   function parseBridgeLine(line) {
@@ -649,6 +669,92 @@ function ModulePage({ page, alertFeed }) {
     };
   }, [page.roomNode?.apiPath]);
 
+  useEffect(() => {
+    const baseUrl = getRoomNodeSecondaryBaseUrl();
+    if (!baseUrl) {
+      setRoomNodeSecondaryState(null);
+      setRoomNodeSecondaryError("");
+      return;
+    }
+
+    let cancelled = false;
+    let eventSource = null;
+
+    async function loadRoomNodeStatus(options = {}) {
+      const preserveError = options.preserveError === true;
+      try {
+        const response = await fetch(`${baseUrl}/status`);
+        if (!response.ok) {
+          throw new Error(`status ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!cancelled) {
+          setRoomNodeSecondaryState(payload);
+          if (!preserveError) {
+            setRoomNodeSecondaryError("");
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRoomNodeSecondaryError(error.message);
+        }
+      }
+    }
+
+    function connectRoomNodeEvents() {
+      if (cancelled) {
+        return;
+      }
+
+      eventSource = new EventSource(`${baseUrl}/events`);
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (!cancelled && payload.type === "snapshot" && payload.state) {
+            setRoomNodeSecondaryState(payload.state);
+            setRoomNodeSecondaryError("");
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setRoomNodeSecondaryError(error.message);
+          }
+        }
+      };
+
+      eventSource.onerror = () => {
+        if (!cancelled) {
+          setRoomNodeSecondaryError("node realtime stream disconnected");
+          eventSource.close();
+          roomNodeSecondaryReconnectTimerRef.current = window.setTimeout(() => {
+            loadRoomNodeStatus({ preserveError: true });
+            connectRoomNodeEvents();
+          }, 2000);
+        }
+      };
+    }
+
+    loadRoomNodeStatus();
+    connectRoomNodeEvents();
+    roomNodeSecondaryStatusTimerRef.current = window.setInterval(() => {
+      loadRoomNodeStatus({ preserveError: true });
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (roomNodeSecondaryReconnectTimerRef.current) {
+        window.clearTimeout(roomNodeSecondaryReconnectTimerRef.current);
+        roomNodeSecondaryReconnectTimerRef.current = null;
+      }
+      if (roomNodeSecondaryStatusTimerRef.current) {
+        window.clearInterval(roomNodeSecondaryStatusTimerRef.current);
+        roomNodeSecondaryStatusTimerRef.current = null;
+      }
+    };
+  }, [page.roomNodeSecondary?.apiPath]);
+
   const liveConnectivity = deviceState
     ? deviceState.paired
       ? deviceState.wakePending
@@ -700,6 +806,13 @@ function ModulePage({ page, alertFeed }) {
     ? roomNodeState.connected
       ? "MQTT online"
       : roomNodeState.lastError
+        ? "MQTT error"
+        : "Offline"
+    : "Waiting for node";
+  const liveRoomNodeSecondaryConnectivity = roomNodeSecondaryState
+    ? roomNodeSecondaryState.connected
+      ? "MQTT online"
+      : roomNodeSecondaryState.lastError
         ? "MQTT error"
         : "Offline"
     : "Waiting for node";
@@ -979,6 +1092,13 @@ function ModulePage({ page, alertFeed }) {
     roomNodeCardRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function focusRoomNodeSecondary() {
+    if (!roomNodeSecondaryCardRef.current) {
+      return;
+    }
+    roomNodeSecondaryCardRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   function focusPageSection(sectionId) {
     const element = sectionRefs.current[sectionId];
     if (!element) {
@@ -1008,6 +1128,30 @@ function ModulePage({ page, alertFeed }) {
       setRoomNodeError("");
     } catch (error) {
       setRoomNodeError(error.message);
+    }
+  }
+
+  async function sendRoomNodeSecondaryCommand(commandPayload) {
+    const baseUrl = getRoomNodeSecondaryBaseUrl();
+    if (!baseUrl) {
+      return;
+    }
+    try {
+      const response = await fetch(`${baseUrl}/command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(commandPayload),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `command ${response.status}`);
+      }
+      if (payload.state) {
+        setRoomNodeSecondaryState(payload.state);
+      }
+      setRoomNodeSecondaryError("");
+    } catch (error) {
+      setRoomNodeSecondaryError(error.message);
     }
   }
 
@@ -1232,6 +1376,17 @@ function ModulePage({ page, alertFeed }) {
               aria-label={page.roomNode.title}
               title={page.roomNode.title}
               onClick={focusRoomNode}
+            >
+              {renderStripIcon("node")}
+            </button>
+          ) : null}
+          {page.roomNodeSecondary ? (
+            <button
+              className="room-device-icon active"
+              type="button"
+              aria-label={page.roomNodeSecondary.title}
+              title={page.roomNodeSecondary.title}
+              onClick={focusRoomNodeSecondary}
             >
               {renderStripIcon("node")}
             </button>
@@ -1621,6 +1776,52 @@ function ModulePage({ page, alertFeed }) {
                     <div key={touch.key} className="next-step-card">
                       <span>{touch.label}</span>
                       <strong>{roomNodeState?.touches?.[touch.key] ? "Touched" : "Idle"}</strong>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ) : null}
+            {page.roomNodeSecondary ? (
+              <article ref={roomNodeSecondaryCardRef} className="tv-control-card">
+                <span className="eyebrow">{page.roomNodeSecondary.title}</span>
+                <strong>{liveRoomNodeSecondaryConnectivity}</strong>
+                <p>
+                  {roomNodeSecondaryError
+                    ? `Node error: ${roomNodeSecondaryError}`
+                    : roomNodeSecondaryState?.lastError
+                      ? roomNodeSecondaryState.lastError
+                      : roomNodeSecondaryState?.ip
+                        ? `IP ${roomNodeSecondaryState.ip} / RSSI ${roomNodeSecondaryState.wifiRssi ?? "n/a"}`
+                        : "Waiting for node state"}
+                </p>
+                <div className="next-step-grid">
+                  {(page.roomNodeSecondary.relays ?? []).map((relay) => {
+                    const relayOn = Boolean(roomNodeSecondaryState?.relays?.[relay.key]);
+                    return (
+                      <div key={relay.key} className="next-step-card">
+                        <span>{relay.label}</span>
+                        <strong>{relayOn ? "On" : "Off"}</strong>
+                        <div className="chip-grid">
+                          <button
+                            className="source-chip"
+                            type="button"
+                            onClick={() =>
+                              sendRoomNodeSecondaryCommand({
+                                action: "set_relay",
+                                value: !relayOn,
+                              })
+                            }
+                          >
+                            {relayOn ? "Turn Off" : "Turn On"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(page.roomNodeSecondary.touches ?? []).map((touch) => (
+                    <div key={touch.key} className="next-step-card">
+                      <span>{touch.label}</span>
+                      <strong>{roomNodeSecondaryState?.touches?.[touch.key] ? "Touched" : "Idle"}</strong>
                     </div>
                   ))}
                 </div>

@@ -149,6 +149,12 @@ export const pageContent = {
         { key: "relay2", label: "Touch 2" },
       ],
     },
+    roomNodeSecondary: {
+      title: "Living Room Node 01",
+      apiPath: "/api/node/living-room-01",
+      relays: [{ key: "relay", label: "Relay" }],
+      touches: [{ key: "touch", label: "Touch" }],
+    },
     highlights: [],
   },
   "bedroom-1": {

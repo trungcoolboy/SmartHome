@@ -62,6 +62,8 @@ function OverviewPage({ onNavigate }) {
 
   const derived = useMemo(() => {
     const tvState = getServiceState(health, "/api/tv/living-room");
+    const roomNode01 = getServiceState(health, "/api/node/living-room-01");
+    const roomNode02 = getServiceState(health, "/api/node/living-room-02");
     const stm32States = [
       getServiceState(health, "/api/stm32/01"),
       getServiceState(health, "/api/stm32/02"),
@@ -75,11 +77,15 @@ function OverviewPage({ onNavigate }) {
     const connectedBoards = stm32States.filter((item) => item?.connected).length;
     const totalBoards = stm32States.filter(Boolean).length;
     const boardErrors = stm32States.filter((item) => item?.error).length;
-    const onlineCount = connectedBoards + (tvOnline ? 1 : 0);
-    const totalKnownDevices = totalBoards + 1;
+    const roomNodeOnlineCount = [roomNode01, roomNode02].filter((item) => item?.connected).length;
+    const totalRoomNodes = [roomNode01, roomNode02].filter(Boolean).length;
+    const onlineCount = connectedBoards + roomNodeOnlineCount + (tvOnline ? 1 : 0);
+    const totalKnownDevices = totalBoards + totalRoomNodes + 1;
 
     return {
       tvState,
+      roomNode01,
+      roomNode02,
       stm32States,
       tvOnline,
       pairedTv,
@@ -88,6 +94,8 @@ function OverviewPage({ onNavigate }) {
       connectedBoards,
       totalBoards,
       boardErrors,
+      roomNodeOnlineCount,
+      totalRoomNodes,
       onlineCount,
       totalKnownDevices,
     };
@@ -131,6 +139,22 @@ function OverviewPage({ onNavigate }) {
       status: derived.tvWakePending ? "Wake pending" : derived.tvOnline ? "Online" : "Offline",
       meta: derived.tvState?.foregroundAppId || (derived.tvStale ? "Cached state retained" : "No active source reported"),
       tone: derived.tvWakePending ? "accent" : derived.tvOnline ? "accent" : "warn",
+    },
+    {
+      name: "Living Room Node 01",
+      status: derived.roomNode01?.connected ? "Linked" : "Down",
+      meta: derived.roomNode01?.ip
+        ? `IP ${derived.roomNode01.ip} / RSSI ${derived.roomNode01.wifiRssi ?? "n/a"}`
+        : derived.roomNode01?.lastError || "No node state",
+      tone: derived.roomNode01?.connected ? "good" : "warn",
+    },
+    {
+      name: "Living Room Node 02",
+      status: derived.roomNode02?.connected ? "Linked" : "Down",
+      meta: derived.roomNode02?.ip
+        ? `IP ${derived.roomNode02.ip} / RSSI ${derived.roomNode02.wifiRssi ?? "n/a"}`
+        : derived.roomNode02?.lastError || "No node state",
+      tone: derived.roomNode02?.connected ? "good" : "warn",
     },
     {
       name: "STM32 #01",
@@ -181,6 +205,8 @@ function OverviewPage({ onNavigate }) {
         ...section,
         metrics: [
           { label: "TV", value: derived.tvOnline ? "Online" : "Offline" },
+          { label: "Node 01", value: derived.roomNode01?.connected ? "Online" : "Offline" },
+          { label: "Node 02", value: derived.roomNode02?.connected ? "Online" : "Offline" },
           { label: "Pairing", value: derived.tvWakePending ? "Waking" : derived.pairedTv ? "Ready" : "Pending" },
           { label: "Source", value: derived.tvState?.foregroundAppId || "No source" },
         ],

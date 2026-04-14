@@ -22,7 +22,10 @@ from webos_tv_bridge import TvState, WebOsTvBridge, start_command_worker
 
 
 TV_ROUTE_PREFIX = "/api/tv/living-room"
-ROOM_NODE_ROUTE_PREFIX = "/api/node/living-room-02"
+ROOM_NODE_CONFIGS = [
+    ("/api/node/living-room-01", "living-room-node-01"),
+    ("/api/node/living-room-02", "living-room-node-02"),
+]
 TV_STALE_AFTER_SECONDS = 20.0
 
 
@@ -151,6 +154,10 @@ class RoomNodeRuntime:
                     self.state.ip = data.get("ip", self.state.ip)
                     self.state.wifi_rssi = data.get("wifiRssi", self.state.wifi_rssi)
                     self.state.free_heap = data.get("freeHeap", self.state.free_heap)
+                    if "relay" in data:
+                        self.state.relays["relay"] = bool(data.get("relay"))
+                    if "touch" in data:
+                        self.state.touches["touch"] = bool(data.get("touch"))
                     for item in data.get("relays", []):
                         key = str(item.get("key", ""))
                         if not key:
@@ -284,7 +291,7 @@ class Handler(BaseHTTPRequestHandler):
     tv_state: TvState | None = None
     tv_sse_hub: TvSseHub | None = None
     stm32_runtimes: dict[str, Stm32Runtime] = {}
-    room_node_runtime: RoomNodeRuntime | None = None
+    room_node_runtimes: dict[str, RoomNodeRuntime] = {}
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -310,8 +317,9 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_tv_request(parsed)
             return
 
-        if parsed.path.startswith(ROOM_NODE_ROUTE_PREFIX):
-            self._handle_room_node_request(parsed)
+        room_node_runtime = self._resolve_room_node_runtime(parsed.path)
+        if room_node_runtime is not None:
+            self._handle_room_node_request(parsed, room_node_runtime)
             return
 
         runtime = self._resolve_stm32_runtime(parsed.path)
@@ -342,19 +350,25 @@ class Handler(BaseHTTPRequestHandler):
             "status": HTTPStatus.OK,
             "payload": {"ok": True, "state": tv_state},
         }
-        if self.room_node_runtime is not None:
-            services[ROOM_NODE_ROUTE_PREFIX] = {
-                "prefix": ROOM_NODE_ROUTE_PREFIX,
-                "host": self.room_node_runtime.broker_host,
-                "port": self.room_node_runtime.broker_port,
+        for prefix, runtime in self.room_node_runtimes.items():
+            services[prefix] = {
+                "prefix": prefix,
+                "host": runtime.broker_host,
+                "port": runtime.broker_port,
                 "ok": True,
                 "status": HTTPStatus.OK,
-                "payload": {"ok": True, "state": self.room_node_runtime.state.snapshot()},
+                "payload": {"ok": True, "state": runtime.state.snapshot()},
             }
         return {"ok": True, "services": services}
 
     def _resolve_stm32_runtime(self, path: str) -> Stm32Runtime | None:
         for prefix, runtime in self.stm32_runtimes.items():
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return runtime
+        return None
+
+    def _resolve_room_node_runtime(self, path: str) -> RoomNodeRuntime | None:
+        for prefix, runtime in self.room_node_runtimes.items():
             if path == prefix or path.startswith(f"{prefix}/"):
                 return runtime
         return None
@@ -392,23 +406,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
-    def _handle_room_node_request(self, parsed: Any) -> None:
-        runtime = self.room_node_runtime
-        if runtime is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "room node runtime is not configured"})
-            return
-        if parsed.path == f"{ROOM_NODE_ROUTE_PREFIX}/status":
+    def _handle_room_node_request(self, parsed: Any, runtime: RoomNodeRuntime) -> None:
+        if parsed.path == f"{runtime.route_prefix}/status":
             self._json(HTTPStatus.OK, runtime.state.snapshot())
             return
-        if parsed.path == f"{ROOM_NODE_ROUTE_PREFIX}/logs":
+        if parsed.path == f"{runtime.route_prefix}/logs":
             params = parse_qs(parsed.query)
             limit = max(1, min(int(params.get("limit", ["50"])[0]), 100))
             self._json(HTTPStatus.OK, {"items": runtime.state.recent_log(limit)})
             return
-        if parsed.path == f"{ROOM_NODE_ROUTE_PREFIX}/events":
+        if parsed.path == f"{runtime.route_prefix}/events":
             self._room_node_sse(runtime)
             return
-        if parsed.path == f"{ROOM_NODE_ROUTE_PREFIX}/command":
+        if parsed.path == f"{runtime.route_prefix}/command":
             self._room_node_command(runtime)
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -633,26 +643,28 @@ def build_stm32_runtimes(args: argparse.Namespace, stop_event: threading.Event) 
     return runtimes
 
 
-def build_room_node_runtime(args: argparse.Namespace, stop_event: threading.Event) -> RoomNodeRuntime:
-    node_id = "living-room-node-02"
-    state = RoomNodeState(node_id=node_id, broker_host=args.mqtt_broker_host, broker_port=args.mqtt_broker_port)
-    sse_hub = SerialSseHub()
-    runtime = RoomNodeRuntime(
-        route_prefix=ROOM_NODE_ROUTE_PREFIX,
-        state=state,
-        sse_hub=sse_hub,
-        stop_event=stop_event,
-        broker_host=args.mqtt_broker_host,
-        broker_port=args.mqtt_broker_port,
-        command_topic=f"smarthome/{node_id}/command",
-        sub_topics=[
-            f"smarthome/{node_id}/availability",
-            f"smarthome/{node_id}/telemetry",
-            f"smarthome/{node_id}/state",
-        ],
-    )
-    runtime.start()
-    return runtime
+def build_room_node_runtimes(args: argparse.Namespace, stop_event: threading.Event) -> dict[str, RoomNodeRuntime]:
+    runtimes: dict[str, RoomNodeRuntime] = {}
+    for route_prefix, node_id in ROOM_NODE_CONFIGS:
+        state = RoomNodeState(node_id=node_id, broker_host=args.mqtt_broker_host, broker_port=args.mqtt_broker_port)
+        sse_hub = SerialSseHub()
+        runtime = RoomNodeRuntime(
+            route_prefix=route_prefix,
+            state=state,
+            sse_hub=sse_hub,
+            stop_event=stop_event,
+            broker_host=args.mqtt_broker_host,
+            broker_port=args.mqtt_broker_port,
+            command_topic=f"smarthome/{node_id}/command",
+            sub_topics=[
+                f"smarthome/{node_id}/availability",
+                f"smarthome/{node_id}/telemetry",
+                f"smarthome/{node_id}/state",
+            ],
+        )
+        runtime.start()
+        runtimes[route_prefix] = runtime
+    return runtimes
 
 
 def main() -> int:
@@ -679,13 +691,13 @@ def main() -> int:
     start_command_worker(tv_bridge, tv_state, tv_sse_hub, stop_event)
 
     stm32_runtimes = build_stm32_runtimes(args, stop_event)
-    room_node_runtime = build_room_node_runtime(args, stop_event)
+    room_node_runtimes = build_room_node_runtimes(args, stop_event)
 
     Handler.tv_bridge = tv_bridge
     Handler.tv_state = tv_state
     Handler.tv_sse_hub = tv_sse_hub
     Handler.stm32_runtimes = stm32_runtimes
-    Handler.room_node_runtime = room_node_runtime
+    Handler.room_node_runtimes = room_node_runtimes
 
     server = SmartHomeApiServer((args.host, args.port), Handler)
     print(f"smart home api listening on http://{args.host}:{args.port}")
@@ -694,7 +706,8 @@ def main() -> int:
             server.handle_request()
     finally:
         server.server_close()
-        room_node_runtime.stop()
+        for runtime in room_node_runtimes.values():
+            runtime.stop()
         for runtime in stm32_runtimes.values():
             runtime.bridge.stop()
     return 0
