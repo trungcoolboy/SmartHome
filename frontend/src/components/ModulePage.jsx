@@ -1750,6 +1750,7 @@ function ModulePage({ page, alertFeed }) {
                 <div className="next-step-grid">
                   {(page.roomNode.relays ?? []).map((relay) => {
                     const relayOn = Boolean(roomNodeState?.relays?.[relay.key]);
+                    const relayLedMode = roomNodeState?.ledModes?.[relay.key] ?? "unknown";
                     return (
                       <div key={relay.key} className="next-step-card">
                         <span>{relay.label}</span>
@@ -1768,6 +1769,30 @@ function ModulePage({ page, alertFeed }) {
                           >
                             {relayOn ? "Turn Off" : "Turn On"}
                           </button>
+                        </div>
+                        <div className="room-node-led-mode room-node-led-mode-compact">
+                          <div className="room-node-led-mode-head">
+                            <span>LED Mode</span>
+                            <strong>{relayLedMode}</strong>
+                          </div>
+                          <div className="chip-grid">
+                            {(page.roomNode.ledModes ?? []).map((mode) => (
+                              <button
+                                key={`${relay.key}-${mode.key}`}
+                                className={`source-chip ${relayLedMode === mode.key ? "active" : ""}`}
+                                type="button"
+                                onClick={() =>
+                                  sendRoomNodeCommand({
+                                    action: "set_led_mode",
+                                    channel: relay.key,
+                                    mode: mode.key,
+                                  })
+                                }
+                              >
+                                {mode.label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       </div>
                     );
@@ -1794,6 +1819,31 @@ function ModulePage({ page, alertFeed }) {
                         ? `IP ${roomNodeSecondaryState.ip} / RSSI ${roomNodeSecondaryState.wifiRssi ?? "n/a"}`
                         : "Waiting for node state"}
                 </p>
+                <div className="room-node-led-mode">
+                  <div className="room-node-led-mode-head">
+                    <span>LED Mode</span>
+                    <strong>{roomNodeSecondaryState?.ledMode ?? "unknown"}</strong>
+                  </div>
+                  <div className="chip-grid">
+                    {(page.roomNodeSecondary.ledModes ?? []).map((mode) => (
+                      <button
+                        key={mode.key}
+                        className={`source-chip ${
+                          roomNodeSecondaryState?.ledMode === mode.key ? "active" : ""
+                        }`}
+                        type="button"
+                        onClick={() =>
+                          sendRoomNodeSecondaryCommand({
+                            action: "set_led_mode",
+                            mode: mode.key,
+                          })
+                        }
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="next-step-grid">
                   {(page.roomNodeSecondary.relays ?? []).map((relay) => {
                     const relayOn = Boolean(roomNodeSecondaryState?.relays?.[relay.key]);

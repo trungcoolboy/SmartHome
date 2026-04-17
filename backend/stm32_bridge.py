@@ -160,6 +160,7 @@ class SerialBridge:
         self.fd: int | None = None
         self.thread: threading.Thread | None = None
         self.write_lock = threading.Lock()
+        self.last_write_ts = 0.0
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name="serial-bridge", daemon=True)
@@ -189,7 +190,13 @@ class SerialBridge:
             raise RuntimeError("serial device is not open")
         try:
             with self.write_lock:
+                now = time.monotonic()
+                gap = now - self.last_write_ts
+                if gap < 0.02:
+                    time.sleep(0.02 - gap)
                 written = os.write(self.fd, payload)
+                termios.tcdrain(self.fd)
+                self.last_write_ts = time.monotonic()
         except OSError as exc:
             self.state.set_error(f"write failed: {exc}")
             self._close_fd()
@@ -348,7 +355,15 @@ def make_handler(state: BridgeState, bridge: SerialBridge, sse_hub: SseHub):
     return Handler
 
 
-def start_publisher(state: BridgeState, sse_hub: SseHub, stop_event: threading.Event) -> threading.Thread:
+def start_publisher(
+    state: BridgeState,
+    sse_hub: SseHub,
+    stop_event: threading.Event,
+    event_callback: Any | None = None,
+) -> threading.Thread:
+    def _stable_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in snapshot.items() if key != "uptimeSeconds"}
+
     def _run() -> None:
         last_seen_line = None
         last_snapshot = ""
@@ -356,11 +371,17 @@ def start_publisher(state: BridgeState, sse_hub: SseHub, stop_event: threading.E
             snapshot = state.snapshot()
             current_line = snapshot["lastLine"]
             if current_line and current_line != last_seen_line:
-                sse_hub.publish({"type": "rx", "payload": current_line, "ts": snapshot["lastSeen"]})
+                event = {"type": "rx", "payload": current_line, "ts": snapshot["lastSeen"]}
+                sse_hub.publish(event)
+                if event_callback is not None:
+                    event_callback(event, snapshot)
                 last_seen_line = current_line
-            encoded_snapshot = json.dumps(snapshot, sort_keys=True, ensure_ascii=True)
+            encoded_snapshot = json.dumps(_stable_snapshot(snapshot), sort_keys=True, ensure_ascii=True)
             if encoded_snapshot != last_snapshot:
-                sse_hub.publish({"type": "snapshot", "state": snapshot})
+                event = {"type": "snapshot", "state": snapshot}
+                sse_hub.publish(event)
+                if event_callback is not None:
+                    event_callback(event, snapshot)
                 last_snapshot = encoded_snapshot
             time.sleep(0.1)
 

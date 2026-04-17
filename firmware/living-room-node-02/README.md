@@ -36,6 +36,21 @@ Toggle relay:
 {"action":"toggle_relay","channel":"relay2"}
 ```
 
+Set LED mode cho tung kenh:
+
+```json
+{"action":"set_led_mode","channel":"relay1","mode":"auto"}
+{"action":"set_led_mode","channel":"relay1","mode":"on"}
+{"action":"set_led_mode","channel":"relay1","mode":"off"}
+{"action":"set_led_mode","channel":"relay1","mode":"breathe"}
+{"action":"set_led_mode","channel":"relay1","mode":"blink_slow"}
+{"action":"set_led_mode","channel":"relay1","mode":"blink_fast"}
+{"action":"set_led_mode","channel":"relay1","mode":"double_blink"}
+{"action":"set_led_mode","channel":"relay1","mode":"heartbeat"}
+{"action":"set_led_mode","channel":"relay1","mode":"pulse"}
+{"action":"set_led_mode","channel":"relay1","mode":"candle"}
+```
+
 ## Pin config
 
 Sua trong [node_config.h](/home/trungcoolboy/smart-home/firmware/living-room-node-02/include/node_config.h):

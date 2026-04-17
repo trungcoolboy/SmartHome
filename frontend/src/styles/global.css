@@ -752,6 +752,44 @@ button {
   background: rgba(255, 255, 255, 0.3);
 }
 
+.room-node-led-mode {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0;
+  padding: 16px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.room-node-led-mode-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.room-node-led-mode-head span {
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.room-node-led-mode-head strong {
+  color: #ffffff;
+}
+
+.room-node-led-mode .source-chip.active {
+  background: rgba(119, 224, 207, 0.18);
+  border-color: rgba(119, 224, 207, 0.32);
+  color: #ffffff;
+}
+
+.room-node-led-mode-compact {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  gap: 10px;
+}
+
 @keyframes sensorPulse {
   0%,
   100% {

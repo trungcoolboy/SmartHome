@@ -4,7 +4,7 @@
 
 namespace NodeConfig {
 
-constexpr char kNodeId[] = "living-room-node-01";
+constexpr char kNodeId[] = "bedroom-2-node-01";
 
 constexpr char kWifiSsid[] = "Ludwig van Beethoven";
 constexpr char kWifiPassword[] = "Anhtrung123";
@@ -14,21 +14,24 @@ constexpr uint16_t kMqttPort = 1883;
 constexpr char kMqttUsername[] = "";
 constexpr char kMqttPassword[] = "";
 
-constexpr char kOtaHostname[] = "living-room-node-01";
+constexpr char kOtaHostname[] = "bedroom-2-node-01";
 constexpr char kOtaPassword[] = "";
 
-constexpr char kAvailabilityTopic[] = "smarthome/living-room-node-01/availability";
-constexpr char kTelemetryTopic[] = "smarthome/living-room-node-01/telemetry";
-constexpr char kCommandTopic[] = "smarthome/living-room-node-01/command";
-constexpr char kStateTopic[] = "smarthome/living-room-node-01/state";
+constexpr char kAvailabilityTopic[] = "smarthome/bedroom-2-node-01/availability";
+constexpr char kTelemetryTopic[] = "smarthome/bedroom-2-node-01/telemetry";
+constexpr char kCommandTopic[] = "smarthome/bedroom-2-node-01/command";
+constexpr char kStateTopic[] = "smarthome/bedroom-2-node-01/state";
 
-constexpr uint8_t kRelayPin = 5;
-constexpr uint8_t kLedPin = 4;
-constexpr uint8_t kTouchPin = 16;
+// Default scaffold pins. Replace after hardware mapping is known.
+constexpr uint8_t kRelayPin = 4;
+constexpr uint8_t kLedPin = 16;
+constexpr uint8_t kTouchPin = 12;
+constexpr uint8_t kBuzzerPin = 5;
 
 constexpr bool kRelayActiveHigh = true;
 constexpr bool kLedActiveHigh = true;
 constexpr bool kTouchActiveHigh = true;
+constexpr bool kBuzzerActiveHigh = true;
 
 constexpr uint32_t kTelemetryIntervalMs = 5000;
 constexpr uint32_t kTouchDebounceMs = 80;
@@ -37,4 +40,4 @@ constexpr uint8_t kLedBreathStartHour = 22;
 constexpr uint8_t kLedBreathEndHour = 6;
 constexpr uint32_t kLedBreathPeriodMs = 4200;
 
-}  // namespace
+}  // namespace NodeConfig

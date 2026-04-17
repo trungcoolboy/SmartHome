@@ -1,4 +1,4 @@
-# Living Room Node 01
+# Bathroom 1 Node 01
 
 ESP-12S room node for:
 
@@ -9,10 +9,10 @@ ESP-12S room node for:
 
 Default topics:
 
-- `smarthome/living-room-node-01/availability`
-- `smarthome/living-room-node-01/telemetry`
-- `smarthome/living-room-node-01/command`
-- `smarthome/living-room-node-01/state`
+- `smarthome/bathroom-1-node-01/availability`
+- `smarthome/bathroom-1-node-01/telemetry`
+- `smarthome/bathroom-1-node-01/command`
+- `smarthome/bathroom-1-node-01/state`
 
 Supported MQTT commands:
 

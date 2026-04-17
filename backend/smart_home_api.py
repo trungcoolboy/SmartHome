@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from event_store import EventStore
 from stm32_bridge import BridgeState, SerialBridge, SseHub as SerialSseHub, start_publisher
 from webos_tv_bridge import SseHub as TvSseHub
 from webos_tv_bridge import TvState, WebOsTvBridge, start_command_worker
@@ -35,6 +36,7 @@ class Stm32Runtime:
     state: BridgeState
     bridge: SerialBridge
     sse_hub: SerialSseHub
+    event_store: EventStore | None = None
 
 
 @dataclass
@@ -53,6 +55,7 @@ class RoomNodeState:
     free_heap: int | None = None
     relays: dict[str, bool] = field(default_factory=dict)
     touches: dict[str, bool] = field(default_factory=dict)
+    led_mode: str | None = None
     log: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=100))
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -72,6 +75,7 @@ class RoomNodeState:
                 "freeHeap": self.free_heap,
                 "relays": dict(self.relays),
                 "touches": dict(self.touches),
+                "ledMode": self.led_mode,
                 "uptimeSeconds": round(time.time() - self.boot_time, 3),
             }
 
@@ -97,6 +101,7 @@ class RoomNodeRuntime:
     sub_topics: list[str]
     process: subprocess.Popen[str] | None = None
     thread: threading.Thread | None = None
+    event_store: EventStore | None = None
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name=f"{self.state.node_id}-mqtt", daemon=True)
@@ -132,6 +137,17 @@ class RoomNodeRuntime:
             text=True,
         )
         self.state.append_log("tx", self.command_topic, encoded)
+        if self.event_store is not None:
+            self.event_store.record(
+                source_type="room_node",
+                source_id=self.state.node_id,
+                event_type="command",
+                direction="tx",
+                topic=self.command_topic,
+                payload_text=encoded,
+                payload_json=payload,
+                state=self.state.snapshot(),
+            )
         self.sse_hub.publish({"type": "tx", "topic": self.command_topic, "payload": encoded, "ts": time.time()})
 
     def _apply_topic_payload(self, topic: str, payload: str) -> None:
@@ -154,6 +170,7 @@ class RoomNodeRuntime:
                     self.state.ip = data.get("ip", self.state.ip)
                     self.state.wifi_rssi = data.get("wifiRssi", self.state.wifi_rssi)
                     self.state.free_heap = data.get("freeHeap", self.state.free_heap)
+                    self.state.led_mode = data.get("ledMode", self.state.led_mode)
                     if "relay" in data:
                         self.state.relays["relay"] = bool(data.get("relay"))
                     if "touch" in data:
@@ -169,6 +186,16 @@ class RoomNodeRuntime:
             with self.state.lock:
                 self.state.last_error = str(exc)
         self.state.append_log("rx", topic, payload)
+        if self.event_store is not None:
+            self.event_store.record(
+                source_type="room_node",
+                source_id=self.state.node_id,
+                event_type="mqtt",
+                direction="rx",
+                topic=topic,
+                payload_text=payload,
+                state=self.state.snapshot(),
+            )
         self.sse_hub.publish({"type": "snapshot", "state": self.state.snapshot()})
         self.sse_hub.publish({"type": "rx", "topic": topic, "payload": payload, "ts": now})
 
@@ -230,7 +257,11 @@ def start_integrated_tv_probe_loop(
     state: TvState,
     sse_hub: TvSseHub,
     stop_event: threading.Event,
+    event_store: EventStore | None = None,
 ) -> threading.Thread:
+    def _stable_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in snapshot.items() if key != "uptimeSeconds"}
+
     def _run() -> None:
         last_snapshot = ""
         while not stop_event.is_set():
@@ -274,9 +305,16 @@ def start_integrated_tv_probe_loop(
                         state.wake_pending = False
 
             snapshot = build_tv_snapshot(state)
-            encoded = json.dumps(snapshot, sort_keys=True, ensure_ascii=True)
+            encoded = json.dumps(_stable_snapshot(snapshot), sort_keys=True, ensure_ascii=True)
             if encoded != last_snapshot:
                 sse_hub.publish({"type": "snapshot", "state": snapshot})
+                if event_store is not None:
+                    event_store.record(
+                        source_type="tv",
+                        source_id=state.tv_id,
+                        event_type="snapshot",
+                        state=snapshot,
+                    )
                 last_snapshot = encoded
             time.sleep(0.75)
 
@@ -292,6 +330,7 @@ class Handler(BaseHTTPRequestHandler):
     tv_sse_hub: TvSseHub | None = None
     stm32_runtimes: dict[str, Stm32Runtime] = {}
     room_node_runtimes: dict[str, RoomNodeRuntime] = {}
+    event_store: EventStore | None = None
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -311,6 +350,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._json(HTTPStatus.OK, self._backend_health())
+            return
+        if parsed.path == "/api/history":
+            self._history()
             return
 
         if parsed.path.startswith(TV_ROUTE_PREFIX):
@@ -387,6 +429,25 @@ class Handler(BaseHTTPRequestHandler):
         if self.tv_sse_hub is None:
             raise RuntimeError("TV SSE hub is not configured")
         return self.tv_sse_hub
+
+    def _require_event_store(self) -> EventStore:
+        if self.event_store is None:
+            raise RuntimeError("Event store is not configured")
+        return self.event_store
+
+    def _history(self) -> None:
+        params = parse_qs(urlparse(self.path).query)
+        limit = max(1, min(int(params.get("limit", ["100"])[0]), 1000))
+        source_type = params.get("source_type", [None])[0]
+        source_id = params.get("source_id", [None])[0]
+        event_type = params.get("event_type", [None])[0]
+        items = self._require_event_store().recent_events(
+            limit=limit,
+            source_type=source_type,
+            source_id=source_id,
+            event_type=event_type,
+        )
+        self._json(HTTPStatus.OK, {"items": items})
 
     def _handle_tv_request(self, parsed: Any) -> None:
         if parsed.path == f"{TV_ROUTE_PREFIX}/status":
@@ -486,6 +547,15 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
+            if self.event_store is not None:
+                self.event_store.record(
+                    source_type="tv",
+                    source_id=state.tv_id,
+                    event_type=action,
+                    direction="tx",
+                    payload_json=body,
+                    state=build_tv_snapshot(state),
+                )
         except Exception as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), "state": build_tv_snapshot(self._require_tv_state())})
             return
@@ -545,6 +615,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
+        if runtime.event_store is not None:
+            runtime.event_store.record(
+                source_type="stm32",
+                source_id=runtime.state.board_id,
+                event_type="tx",
+                direction="tx",
+                payload_text=text,
+                state=runtime.state.snapshot(),
+            )
         runtime.sse_hub.publish({"type": "tx", "payload": text, "ts": time.time()})
         self._json(HTTPStatus.OK, {"ok": True, "sent": text})
 
@@ -618,10 +697,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stm32-baudrate", type=int, default=115200)
     parser.add_argument("--mqtt-broker-host", default="127.0.0.1")
     parser.add_argument("--mqtt-broker-port", type=int, default=1883)
+    parser.add_argument(
+        "--event-db-path",
+        default=str(Path(__file__).with_name("state") / "smart_home_events.sqlite3"),
+    )
     return parser.parse_args()
 
 
-def build_stm32_runtimes(args: argparse.Namespace, stop_event: threading.Event) -> dict[str, Stm32Runtime]:
+def build_stm32_runtimes(
+    args: argparse.Namespace,
+    stop_event: threading.Event,
+    event_store: EventStore | None = None,
+) -> dict[str, Stm32Runtime]:
     configs = [
         ("/api/stm32/01", "stm32-01", args.stm32_01_device),
         ("/api/stm32/02", "stm32-02", args.stm32_02_device),
@@ -633,17 +720,34 @@ def build_stm32_runtimes(args: argparse.Namespace, stop_event: threading.Event) 
         bridge = SerialBridge(device, args.stm32_baudrate, state)
         sse_hub = SerialSseHub()
         bridge.start()
-        start_publisher(state, sse_hub, stop_event)
+        def _stm32_event_callback(event: dict[str, Any], snapshot: dict[str, Any], board_id: str = board_id) -> None:
+            if event_store is None:
+                return
+            event_store.record(
+                source_type="stm32",
+                source_id=board_id,
+                event_type=event["type"],
+                direction="rx" if event["type"] == "rx" else None,
+                payload_text=event.get("payload"),
+                state=snapshot if event["type"] == "snapshot" else snapshot,
+            )
+
+        start_publisher(state, sse_hub, stop_event, event_callback=_stm32_event_callback)
         runtimes[route_prefix] = Stm32Runtime(
             route_prefix=route_prefix,
             state=state,
             bridge=bridge,
             sse_hub=sse_hub,
+            event_store=event_store,
         )
     return runtimes
 
 
-def build_room_node_runtimes(args: argparse.Namespace, stop_event: threading.Event) -> dict[str, RoomNodeRuntime]:
+def build_room_node_runtimes(
+    args: argparse.Namespace,
+    stop_event: threading.Event,
+    event_store: EventStore | None = None,
+) -> dict[str, RoomNodeRuntime]:
     runtimes: dict[str, RoomNodeRuntime] = {}
     for route_prefix, node_id in ROOM_NODE_CONFIGS:
         state = RoomNodeState(node_id=node_id, broker_host=args.mqtt_broker_host, broker_port=args.mqtt_broker_port)
@@ -662,6 +766,7 @@ def build_room_node_runtimes(args: argparse.Namespace, stop_event: threading.Eve
                 f"smarthome/{node_id}/state",
             ],
         )
+        runtime.event_store = event_store
         runtime.start()
         runtimes[route_prefix] = runtime
     return runtimes
@@ -671,6 +776,7 @@ def main() -> int:
     args = parse_args()
     socket.setdefaulttimeout(15)
     stop_event = threading.Event()
+    event_store = EventStore(args.event_db_path)
 
     def _shutdown(signum: int, frame: Any) -> None:
         del signum, frame
@@ -687,17 +793,18 @@ def main() -> int:
     )
     tv_bridge = WebOsTvBridge(state=tv_state, client_key_path=Path(args.tv_client_key_path))
     tv_sse_hub = TvSseHub()
-    start_integrated_tv_probe_loop(tv_bridge, tv_state, tv_sse_hub, stop_event)
+    start_integrated_tv_probe_loop(tv_bridge, tv_state, tv_sse_hub, stop_event, event_store=event_store)
     start_command_worker(tv_bridge, tv_state, tv_sse_hub, stop_event)
 
-    stm32_runtimes = build_stm32_runtimes(args, stop_event)
-    room_node_runtimes = build_room_node_runtimes(args, stop_event)
+    stm32_runtimes = build_stm32_runtimes(args, stop_event, event_store=event_store)
+    room_node_runtimes = build_room_node_runtimes(args, stop_event, event_store=event_store)
 
     Handler.tv_bridge = tv_bridge
     Handler.tv_state = tv_state
     Handler.tv_sse_hub = tv_sse_hub
     Handler.stm32_runtimes = stm32_runtimes
     Handler.room_node_runtimes = room_node_runtimes
+    Handler.event_store = event_store
 
     server = SmartHomeApiServer((args.host, args.port), Handler)
     print(f"smart home api listening on http://{args.host}:{args.port}")
@@ -710,6 +817,7 @@ def main() -> int:
             runtime.stop()
         for runtime in stm32_runtimes.values():
             runtime.bridge.stop()
+        event_store.close()
     return 0
 
 

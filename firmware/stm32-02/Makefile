@@ -39,10 +39,14 @@ C_SOURCES := \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_flash_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_flash_ramfunc.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_gpio.c \
+	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c.c \
+	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_rcc.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_rcc_ex.c \
+	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_tim.c \
+	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_tim_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_uart.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_uart_ex.c
 

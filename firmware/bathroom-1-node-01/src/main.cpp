@@ -30,6 +30,7 @@ struct ChannelState {
   uint8_t relay_pin;
   uint8_t touch_pin;
   uint8_t led_pin;
+  bool has_relay;
   bool relay_active_high;
   bool relay_on;
   bool last_touch_active;
@@ -38,9 +39,15 @@ struct ChannelState {
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay1ActiveHigh, false, false, 0, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay2ActiveHigh, false, false, 0, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, 0, LedMode::Auto},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, 0, LedMode::Auto},
+  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, 0, LedMode::Auto},
 };
+
+constexpr char kRemoteNode02CommandTopic[] = "smarthome/bathroom-1-node-02/command";
+constexpr char kRemoteNode02StateTopic[] = "smarthome/bathroom-1-node-02/state";
+constexpr char kRemoteNode02TelemetryTopic[] = "smarthome/bathroom-1-node-02/telemetry";
+bool remote_node02_relay_on = false;
 
 unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
@@ -157,14 +164,6 @@ bool is_led_breath_window() {
   return hour >= NodeConfig::kLedBreathStartHour && hour < NodeConfig::kLedBreathEndHour;
 }
 
-uint16_t current_breath_level() {
-  const unsigned long phase = millis() % NodeConfig::kLedBreathPeriodMs;
-  const float half_period = NodeConfig::kLedBreathPeriodMs / 2.0f;
-  float ratio = phase <= half_period ? (phase / half_period) : ((NodeConfig::kLedBreathPeriodMs - phase) / half_period);
-  ratio = 0.12f + (0.88f * ratio);
-  return static_cast<uint16_t>(ratio * 255.0f);
-}
-
 uint16_t current_led_level(LedMode mode, bool breath_window) {
   const unsigned long now_ms = millis();
   switch (mode) {
@@ -212,16 +211,20 @@ uint16_t current_led_level(LedMode mode, bool breath_window) {
 void update_leds() {
   if (!mqtt_client.connected()) {
     const uint16_t level = current_led_level(LedMode::BlinkFast, false);
-    for (auto& channel : channels) {
+    for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
+      auto& channel = channels[i];
       write_led_level(channel.led_pin, level);
     }
     return;
   }
   const bool breath = is_led_breath_window();
-  for (auto& channel : channels) {
+  for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
+    auto& channel = channels[i];
     const bool touch_active = read_touch_active(channel.touch_pin);
     if (touch_active) {
       write_led_level(channel.led_pin, 255);
+    } else if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
+      write_led_level(channel.led_pin, 0);
     } else {
       write_led_level(channel.led_pin, current_led_level(channel.led_mode, breath));
     }
@@ -229,7 +232,9 @@ void update_leds() {
 }
 
 void apply_channel_output(ChannelState& channel) {
-  digitalWrite(channel.relay_pin, as_output_level(channel.relay_on, channel.relay_active_high) ? HIGH : LOW);
+  if (channel.has_relay) {
+    digitalWrite(channel.relay_pin, as_output_level(channel.relay_on, channel.relay_active_high) ? HIGH : LOW);
+  }
   update_leds();
 }
 
@@ -237,17 +242,14 @@ bool publish_availability(const char* value) {
   if (!mqtt_client.connected()) {
     return false;
   }
-  if (!mqtt_client.publish(NodeConfig::kAvailabilityTopic, value, true)) {
-    Serial.println("mqtt publish availability failed");
-    return false;
-  }
-  return true;
+  return mqtt_client.publish(NodeConfig::kAvailabilityTopic, value, true);
 }
 
 bool publish_state_now(const char* event, const char* channel_key = nullptr, const char* detail = nullptr) {
   if (!mqtt_client.connected()) {
     return false;
   }
+
   JsonDocument doc;
   doc["nodeId"] = NodeConfig::kNodeId;
   doc["event"] = event;
@@ -260,21 +262,51 @@ bool publish_state_now(const char* event, const char* channel_key = nullptr, con
     doc["detail"] = detail;
   }
 
-  JsonArray relay_states = doc["relays"].to<JsonArray>();
+  JsonArray channel_states = doc["channels"].to<JsonArray>();
   for (const auto& channel : channels) {
-    JsonObject item = relay_states.add<JsonObject>();
+    JsonObject item = channel_states.add<JsonObject>();
     item["key"] = channel.key;
-    item["on"] = channel.relay_on;
+    item["touchActive"] = read_touch_active(channel.touch_pin);
     item["ledMode"] = led_mode_name(channel.led_mode);
+    item["hasRelay"] = channel.has_relay;
+    if (channel.has_relay) {
+      item["relayOn"] = channel.relay_on;
+    }
   }
 
-  char payload[320];
+  char payload[512];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
-  if (!mqtt_client.publish(NodeConfig::kStateTopic, reinterpret_cast<const uint8_t*>(payload), len, false)) {
-    Serial.printf("mqtt publish state failed len=%u\n", static_cast<unsigned>(len));
+  return mqtt_client.publish(NodeConfig::kStateTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
+}
+
+bool publish_telemetry_now() {
+  if (!mqtt_client.connected()) {
     return false;
   }
-  return true;
+
+  JsonDocument doc;
+  doc["nodeId"] = NodeConfig::kNodeId;
+  doc["uptimeMs"] = millis();
+  doc["wifiRssi"] = WiFi.RSSI();
+  doc["ip"] = WiFi.localIP().toString();
+  doc["freeHeap"] = ESP.getFreeHeap();
+
+  JsonArray channel_states = doc["channels"].to<JsonArray>();
+  for (const auto& channel : channels) {
+    JsonObject item = channel_states.add<JsonObject>();
+    item["key"] = channel.key;
+    item["touchActive"] = read_touch_active(channel.touch_pin);
+    item["ledMode"] = led_mode_name(channel.led_mode);
+    item["hasRelay"] = channel.has_relay;
+    if (channel.has_relay) {
+      item["relayOn"] = channel.relay_on;
+    }
+  }
+  doc["remoteRelay"] = remote_node02_relay_on;
+
+  char payload[576];
+  const size_t len = serializeJson(doc, payload, sizeof(payload));
+  return mqtt_client.publish(NodeConfig::kTelemetryTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
 }
 
 void queue_state(const char* event, const char* channel_key = nullptr, const char* detail = nullptr) {
@@ -284,56 +316,23 @@ void queue_state(const char* event, const char* channel_key = nullptr, const cha
   state_dirty = true;
 }
 
-bool publish_telemetry_now() {
+void flush_pending_mqtt() {
   if (!mqtt_client.connected()) {
-    return false;
-  }
-  JsonDocument doc;
-  doc["nodeId"] = NodeConfig::kNodeId;
-  doc["uptimeMs"] = millis();
-  doc["wifiRssi"] = WiFi.RSSI();
-  doc["ip"] = WiFi.localIP().toString();
-  doc["freeHeap"] = ESP.getFreeHeap();
-
-  JsonArray relay_states = doc["relays"].to<JsonArray>();
-  for (const auto& channel : channels) {
-    JsonObject item = relay_states.add<JsonObject>();
-    item["key"] = channel.key;
-    item["on"] = channel.relay_on;
-    item["touchActive"] = read_touch_active(channel.touch_pin);
-    item["ledMode"] = led_mode_name(channel.led_mode);
+    return;
   }
 
-  char payload[384];
-  const size_t len = serializeJson(doc, payload, sizeof(payload));
-  if (!mqtt_client.publish(NodeConfig::kTelemetryTopic, reinterpret_cast<const uint8_t*>(payload), len, false)) {
-    Serial.printf("mqtt publish telemetry failed len=%u\n", static_cast<unsigned>(len));
-    return false;
-  }
-  return true;
-}
-
-void setup_ota() {
-  ArduinoOTA.setHostname(NodeConfig::kOtaHostname);
-  if (NodeConfig::kOtaPassword[0] != '\0') {
-    ArduinoOTA.setPassword(NodeConfig::kOtaPassword);
+  if (state_dirty) {
+    if (publish_state_now(pending_event, pending_channel_key, pending_detail)) {
+      state_dirty = false;
+    }
   }
 
-  ArduinoOTA.onStart([]() {
-    queue_state("ota_start");
-  });
-
-  ArduinoOTA.onEnd([]() {
-    queue_state("ota_end");
-  });
-
-  ArduinoOTA.onError([](ota_error_t error) {
-    char detail[24];
-    snprintf(detail, sizeof(detail), "code_%u", static_cast<unsigned>(error));
-    queue_state("ota_error", nullptr, detail);
-  });
-
-  ArduinoOTA.begin();
+  if (telemetry_dirty || (millis() - last_telemetry_ms) >= NodeConfig::kTelemetryIntervalMs) {
+    if (publish_telemetry_now()) {
+      telemetry_dirty = false;
+      last_telemetry_ms = millis();
+    }
+  }
 }
 
 ChannelState* find_channel(const char* key) {
@@ -346,6 +345,10 @@ ChannelState* find_channel(const char* key) {
 }
 
 void set_channel(ChannelState& channel, bool on, const char* event) {
+  if (!channel.has_relay) {
+    queue_state("unsupported_channel_action", channel.key, event);
+    return;
+  }
   channel.relay_on = on;
   last_local_action_ms = millis();
   apply_channel_output(channel);
@@ -364,8 +367,42 @@ void set_channel_led_mode(ChannelState& channel, LedMode mode, const char* event
   queue_state(event, channel.key, led_mode_name(channel.led_mode));
 }
 
+void handle_aux_touch(ChannelState& channel) {
+  if (strcmp(channel.key, "touch3") == 0 && mqtt_client.connected()) {
+    JsonDocument doc;
+    doc["action"] = "toggle_relay";
+    char payload[96];
+    const size_t len = serializeJson(doc, payload, sizeof(payload));
+    if (mqtt_client.publish(kRemoteNode02CommandTopic, reinterpret_cast<const uint8_t*>(payload), len, false)) {
+      last_local_action_ms = millis();
+      telemetry_dirty = true;
+      queue_state("remote_toggle_sent", channel.key, "bathroom-1-node-02");
+      return;
+    }
+    queue_state("remote_toggle_failed", channel.key, "publish");
+    return;
+  }
+  last_local_action_ms = millis();
+  telemetry_dirty = true;
+  queue_state("touch_event", channel.key, "press");
+}
+
 void handle_command(char* topic, byte* payload, unsigned int length) {
-  (void)topic;
+  if (strcmp(topic, kRemoteNode02StateTopic) == 0 || strcmp(topic, kRemoteNode02TelemetryTopic) == 0) {
+    JsonDocument doc;
+    const auto err = deserializeJson(doc, payload, length);
+    if (err) {
+      return;
+    }
+    const bool next_relay = doc["relay"] | false;
+    if (next_relay != remote_node02_relay_on) {
+      remote_node02_relay_on = next_relay;
+      telemetry_dirty = true;
+      queue_state("remote_state_sync", "touch3", remote_node02_relay_on ? "on" : "off");
+      update_leds();
+    }
+    return;
+  }
 
   JsonDocument doc;
   const auto err = deserializeJson(doc, payload, length);
@@ -422,25 +459,6 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
   queue_state("unknown_action", nullptr, action);
 }
 
-void flush_pending_mqtt() {
-  if (!mqtt_client.connected()) {
-    return;
-  }
-
-  if (state_dirty) {
-    if (publish_state_now(pending_event, pending_channel_key, pending_detail)) {
-      state_dirty = false;
-    }
-  }
-
-  if (telemetry_dirty || (millis() - last_telemetry_ms) >= NodeConfig::kTelemetryIntervalMs) {
-    if (publish_telemetry_now()) {
-      telemetry_dirty = false;
-      last_telemetry_ms = millis();
-    }
-  }
-}
-
 void ensure_wifi() {
   if (WiFi.status() == WL_CONNECTED) {
     return;
@@ -472,7 +490,7 @@ void ensure_mqtt() {
 
   mqtt_client.setServer(NodeConfig::kMqttHost, NodeConfig::kMqttPort);
   mqtt_client.setCallback(handle_command);
-  mqtt_client.setBufferSize(512);
+  mqtt_client.setBufferSize(768);
   mqtt_client.setKeepAlive(15);
   mqtt_client.setSocketTimeout(1);
   const bool connected =
@@ -491,6 +509,8 @@ void ensure_mqtt() {
     mqtt_retry_backoff_ms = kMqttRetryBackoffMinMs;
     publish_availability("online");
     mqtt_client.subscribe(NodeConfig::kCommandTopic);
+    mqtt_client.subscribe(kRemoteNode02StateTopic);
+    mqtt_client.subscribe(kRemoteNode02TelemetryTopic);
     queue_state("mqtt_connected");
     telemetry_dirty = true;
   } else {
@@ -508,6 +528,23 @@ void ensure_time() {
   time_configured = true;
 }
 
+void setup_ota() {
+  ArduinoOTA.setHostname(NodeConfig::kOtaHostname);
+  if (NodeConfig::kOtaPassword[0] != '\0') {
+    ArduinoOTA.setPassword(NodeConfig::kOtaPassword);
+  }
+
+  ArduinoOTA.onStart([]() { queue_state("ota_start"); });
+  ArduinoOTA.onEnd([]() { queue_state("ota_end"); });
+  ArduinoOTA.onError([](ota_error_t error) {
+    char detail[24];
+    snprintf(detail, sizeof(detail), "code_%u", static_cast<unsigned>(error));
+    queue_state("ota_error", nullptr, detail);
+  });
+
+  ArduinoOTA.begin();
+}
+
 void poll_touch_inputs() {
   const unsigned long now = millis();
 
@@ -519,7 +556,14 @@ void poll_touch_inputs() {
         channel.last_touch_active = active;
         apply_channel_output(channel);
         if (active) {
-          toggle_channel(channel, "touch_toggle");
+          if (channel.has_relay) {
+            toggle_channel(channel, "touch_toggle");
+          } else {
+            handle_aux_touch(channel);
+          }
+        } else {
+          telemetry_dirty = true;
+          queue_state("touch_release", channel.key);
         }
       }
     }
@@ -529,7 +573,9 @@ void poll_touch_inputs() {
 void init_gpio() {
   analogWriteRange(255);
   for (auto& channel : channels) {
-    pinMode(channel.relay_pin, OUTPUT);
+    if (channel.has_relay) {
+      pinMode(channel.relay_pin, OUTPUT);
+    }
     pinMode(channel.led_pin, OUTPUT);
     pinMode(channel.touch_pin, INPUT);
     channel.last_touch_active = read_touch_active(channel.touch_pin);
@@ -544,7 +590,7 @@ void setup() {
   Serial.begin(115200);
   delay(50);
   Serial.println();
-  Serial.println("Living Room Node 02 boot");
+  Serial.println("Bathroom 1 Node 01 boot");
 
   init_gpio();
   mqtt_retry_backoff_ms = kMqttRetryBackoffMinMs;
@@ -573,12 +619,13 @@ void loop() {
   if (now - last_status_log_ms >= 1000) {
     last_status_log_ms = now;
     Serial.printf(
-        "wifi=%s ip=%s rssi=%d mqtt=%s relay1=%s relay2=%s\n",
+        "wifi=%s ip=%s rssi=%d mqtt=%s relay1=%s relay2=%s touch3=%s\n",
         WiFi.status() == WL_CONNECTED ? "up" : "down",
         WiFi.localIP().toString().c_str(),
         WiFi.RSSI(),
         mqtt_client.connected() ? "up" : "down",
         channels[0].relay_on ? "on" : "off",
-        channels[1].relay_on ? "on" : "off");
+        channels[1].relay_on ? "on" : "off",
+        read_touch_active(channels[2].touch_pin) ? "on" : "off");
   }
 }
