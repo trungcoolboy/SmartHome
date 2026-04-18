@@ -937,6 +937,42 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.b-axis-tune-card {
+  grid-column: 1 / -1;
+}
+
+.b-axis-tune-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.b-axis-tune-field {
+  display: grid;
+  gap: 10px;
+}
+
+.b-axis-tune-field input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(11, 18, 23, 0.72);
+  color: #ffffff;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.b-axis-tune-field input:disabled {
+  opacity: 0.6;
+}
+
+.b-axis-tune-actions {
+  margin-top: 16px;
+}
+
 .volume-bar {
   height: 10px;
   margin-top: 12px;

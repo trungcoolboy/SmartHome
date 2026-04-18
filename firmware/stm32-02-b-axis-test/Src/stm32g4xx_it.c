@@ -60,9 +60,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
-extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim6;
-
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -153,11 +151,6 @@ void USART1_IRQHandler(void)
 void TIM6_DAC_IRQHandler(void)
 {
   HAL_TIM_IRQHandler(&htim6);
-}
-
-void USART3_IRQHandler(void)
-{
-  HAL_UART_IRQHandler(&huart2);
 }
 
 /* USER CODE BEGIN 1 */

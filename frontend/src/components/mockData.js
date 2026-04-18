@@ -268,6 +268,17 @@ export const pageContent = {
     description:
       "This page groups the three STM32 aquarium subsystems into one module so daily operation stays in a single place.",
     deviceStrip: [{ id: "control", label: "Control", icon: "control" }],
+    bridge: {
+      eyebrow: "Motion Bridge",
+      kind: "STM32 #02",
+      name: "Aquarium Motion",
+      apiPath: "/api/stm32/02",
+      note: "B-axis motion tuning is exposed here so travel length and near-endstop deceleration can be adjusted without reflashing.",
+      bAxisTuning: {
+        defaultTravelSteps: 22991,
+        defaultDecelWindowSteps: 300,
+      },
+    },
     pumpControl: {
       title: "Pump",
       apiPath: "/api/stm32/01",
@@ -405,11 +416,11 @@ export const pageContent = {
             "OLED I2C SDA: PB9 / CN10-5",
             "28BYJ-48 #1 STEP: PB12 / CN10-16",
             "28BYJ-48 #1 DIR: PB13 / CN10-30",
-            "28BYJ-48 #1 EN: PB14 / CN10-28 (A4988 EN, active-low)",
+            "28BYJ-48 #1 EN: PB14 / CN10-28 (TMC2209 EN, active-low, no UART)",
             "28BYJ-48 #1 Endstop: PB3 / CN10-31 (mechanical NC, pull-up)",
             "28BYJ-48 #2 STEP: PB15 / CN10-26",
             "28BYJ-48 #2 DIR: PC10 / CN7-1",
-            "28BYJ-48 #2 EN: PC11 / CN7-2 (A4988 EN, active-low)",
+            "28BYJ-48 #2 EN: PC11 / CN7-2 (TMC2209 EN, active-low, no UART)",
             "Magnet PWM: PA11 / CN10-14",
             "TMC2209 A Address: MS1=GND, MS2=GND -> addr 0",
             "TMC2209 B Address: MS1=3.3V, MS2=3.3V -> addr 3",

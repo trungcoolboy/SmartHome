@@ -32,14 +32,16 @@ struct ChannelState {
   uint8_t led_pin;
   bool relay_active_high;
   bool relay_on;
-  bool last_touch_active;
-  unsigned long last_touch_change_ms;
+  bool touch_active;
+  bool last_touch_raw;
+  unsigned long last_touch_raw_change_ms;
+  unsigned long last_touch_toggle_ms;
   LedMode led_mode;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay1ActiveHigh, false, false, 0, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay2ActiveHigh, false, false, 0, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, 0, LedMode::Auto},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, 0, LedMode::Auto},
 };
 
 unsigned long last_telemetry_ms = 0;
@@ -58,6 +60,7 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
+constexpr unsigned long kTouchRetriggerGuardMs = 1500;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -219,8 +222,7 @@ void update_leds() {
   }
   const bool breath = is_led_breath_window();
   for (auto& channel : channels) {
-    const bool touch_active = read_touch_active(channel.touch_pin);
-    if (touch_active) {
+    if (channel.touch_active) {
       write_led_level(channel.led_pin, 255);
     } else {
       write_led_level(channel.led_pin, current_led_level(channel.led_mode, breath));
@@ -300,7 +302,7 @@ bool publish_telemetry_now() {
     JsonObject item = relay_states.add<JsonObject>();
     item["key"] = channel.key;
     item["on"] = channel.relay_on;
-    item["touchActive"] = read_touch_active(channel.touch_pin);
+    item["touchActive"] = channel.touch_active;
     item["ledMode"] = led_mode_name(channel.led_mode);
   }
 
@@ -512,16 +514,25 @@ void poll_touch_inputs() {
   const unsigned long now = millis();
 
   for (auto& channel : channels) {
-    const bool active = read_touch_active(channel.touch_pin);
-    if (active != channel.last_touch_active) {
-      if ((now - channel.last_touch_change_ms) >= NodeConfig::kTouchDebounceMs) {
-        channel.last_touch_change_ms = now;
-        channel.last_touch_active = active;
-        apply_channel_output(channel);
-        if (active) {
-          toggle_channel(channel, "touch_toggle");
-        }
-      }
+    const bool raw = read_touch_active(channel.touch_pin);
+    if (raw != channel.last_touch_raw) {
+      channel.last_touch_raw = raw;
+      channel.last_touch_raw_change_ms = now;
+    }
+
+    if (raw == channel.touch_active) {
+      continue;
+    }
+
+    if ((now - channel.last_touch_raw_change_ms) < NodeConfig::kTouchDebounceMs) {
+      continue;
+    }
+
+    channel.touch_active = raw;
+    apply_channel_output(channel);
+    if (channel.touch_active && (now - channel.last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+      channel.last_touch_toggle_ms = now;
+      toggle_channel(channel, "touch_toggle");
     }
   }
 }
@@ -532,8 +543,10 @@ void init_gpio() {
     pinMode(channel.relay_pin, OUTPUT);
     pinMode(channel.led_pin, OUTPUT);
     pinMode(channel.touch_pin, INPUT);
-    channel.last_touch_active = read_touch_active(channel.touch_pin);
-    channel.last_touch_change_ms = millis();
+    channel.last_touch_raw = read_touch_active(channel.touch_pin);
+    channel.touch_active = channel.last_touch_raw;
+    channel.last_touch_raw_change_ms = millis();
+    channel.last_touch_toggle_ms = 0;
     apply_channel_output(channel);
   }
 }

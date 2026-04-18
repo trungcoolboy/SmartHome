@@ -8,6 +8,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "b_axis_motion.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -23,6 +24,7 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim6;
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
@@ -46,8 +48,14 @@ typedef struct
   uint8_t homed;
   uint8_t homing_state;
   int32_t scan_travel_steps;
+  uint32_t tuned_travel_steps;
+  uint32_t decel_window_steps;
   uint32_t next_step_tick;
   uint32_t step_interval_ticks;
+  uint16_t timer_countdown_ticks;
+  uint8_t dir_setup_ticks;
+  uint8_t step_high_ticks;
+  uint8_t state_dirty;
   uint16_t start_interval_us;
   uint16_t cruise_interval_us;
   uint16_t homing_interval_us;
@@ -57,6 +65,22 @@ typedef struct
   uint32_t tmc_ihold_irun_shadow;
   uint8_t tmc_shadow_valid;
 } AxisState;
+
+#define B_TUNED_TRAVEL_STEPS        22991U
+#define B_TUNED_DECEL_WINDOW_STEPS    300U
+
+typedef struct
+{
+  volatile uint8_t active;
+  volatile int32_t direction;
+  volatile uint32_t steps_remaining;
+  volatile uint32_t moved_steps;
+  volatile uint32_t interval_us;
+  volatile uint32_t current_interval_us;
+  volatile uint8_t stop_on_endstop;
+  volatile uint8_t continuous;
+  volatile uint8_t pulse_high_phase;
+} BMotionState;
 
 static AxisState axes[] = {
   {
@@ -71,6 +95,8 @@ static AxisState axes[] = {
     .max_endstop_pin = A_MAX_ENDSTOP_Pin,
     .driver_addr = 0U,
     .scan_travel_steps = 0,
+    .tuned_travel_steps = 0U,
+    .decel_window_steps = 0U,
     .start_interval_us = 600U,
     .cruise_interval_us = 80U,
     .homing_interval_us = 850U,
@@ -87,13 +113,17 @@ static AxisState axes[] = {
     .max_endstop_port = B_MAX_ENDSTOP_GPIO_Port,
     .max_endstop_pin = B_MAX_ENDSTOP_Pin,
     .driver_addr = 3U,
-    .scan_travel_steps = 0,
-    .start_interval_us = 600U,
-    .cruise_interval_us = 80U,
-    .homing_interval_us = 850U,
-    .accel_interval_delta_us = 20U,
+    .scan_travel_steps = (int32_t)B_TUNED_TRAVEL_STEPS,
+    .tuned_travel_steps = B_TUNED_TRAVEL_STEPS,
+    .decel_window_steps = B_TUNED_DECEL_WINDOW_STEPS,
+    .start_interval_us = 2000U,
+    .cruise_interval_us = 100U,
+    .homing_interval_us = 2000U,
+    .accel_interval_delta_us = 10U,
   },
 };
+
+static BMotionState b_motion = {0};
 
 static volatile uint8_t tmc_rx_ring[64];
 static volatile uint16_t tmc_rx_head = 0U;
@@ -177,9 +207,9 @@ static ByjStepperState byj_steppers[] = {
     .en_pin = BYJ1_EN_Pin,
     .endstop_port = BYJ1_ENDSTOP_GPIO_Port,
     .endstop_pin = BYJ1_ENDSTOP_Pin,
-    .start_interval_us = 2200U,
-    .cruise_interval_us = 900U,
-    .accel_interval_delta_us = 40U,
+    .start_interval_us = 8000U,
+    .cruise_interval_us = 4000U,
+    .accel_interval_delta_us = 200U,
   },
   {
     .key = "byj2",
@@ -189,9 +219,9 @@ static ByjStepperState byj_steppers[] = {
     .dir_pin = BYJ2_DIR_Pin,
     .en_port = BYJ2_EN_GPIO_Port,
     .en_pin = BYJ2_EN_Pin,
-    .start_interval_us = 2200U,
-    .cruise_interval_us = 900U,
-    .accel_interval_delta_us = 40U,
+    .start_interval_us = 125U,
+    .cruise_interval_us = 31U,
+    .accel_interval_delta_us = 3U,
   },
 };
 
@@ -233,6 +263,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_TIM6_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 #if defined(__ICCARM__)
@@ -245,9 +276,12 @@ int iar_fputc(int ch);
 #endif
 
 static void uart_write_line(const char *text);
+static uint16_t axis_timer_ticks_from_us(uint32_t us);
 static AxisState *find_axis(const char *key);
+static uint32_t axis_effective_travel_steps(const AxisState *axis);
 static void emit_axis_state(const AxisState *axis);
 static void emit_all_axis_states(void);
+static void emit_dirty_axis_states(void);
 static void emit_tmc_status(void);
 static void apply_axis_enable_state(void);
 static void pulse_axis_step(AxisState *axis, int32_t direction);
@@ -302,6 +336,7 @@ static void apply_byj_stepper_enable(ByjStepperState *stepper);
 static void byj_prime_motion_profile(ByjStepperState *stepper);
 static void byj_begin_motion(ByjStepperState *stepper, int32_t velocity, int32_t target);
 static uint8_t read_byj_endstop_triggered(const ByjStepperState *stepper);
+static void step_delay_us(uint16_t us);
 static void pulse_byj_step(ByjStepperState *stepper, int32_t direction);
 static void tick_byj_steppers(void);
 static HAL_StatusTypeDef oled_write_command(uint8_t cmd);
@@ -315,6 +350,18 @@ static void oled_init_display(void);
 static void tick_oled(void);
 static void process_command_line(char *line);
 static void tick_axes(void);
+static void tick_axes_timer_isr(void);
+static void axis_stop_motion(AxisState *axis);
+static AxisState *b_axis_state(void);
+static void b_motion_start(int32_t direction, uint32_t steps, uint32_t interval_us, uint8_t stop_on_endstop);
+static void b_motion_start_continuous(int32_t direction, uint32_t interval_us);
+static void b_motion_stop(void);
+static void b_motion_wait(void);
+static uint32_t b_run_steps(int32_t direction, uint32_t steps, uint16_t interval_us, uint8_t stop_on_endstop);
+static uint32_t b_target_interval_for_position(void);
+static void b_home_blocking(void);
+static void b_scan_blocking(void);
+static void tick_b_motion_isr(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -322,6 +369,20 @@ static void tick_axes(void);
 static void uart_write_line(const char *text)
 {
   printf("%s\r\n", text);
+}
+
+static uint16_t axis_timer_ticks_from_us(uint32_t us)
+{
+  uint32_t ticks = (us + 4U) / 5U;
+  if (ticks == 0U)
+  {
+    ticks = 1U;
+  }
+  if (ticks > 0xFFFFU)
+  {
+    ticks = 0xFFFFU;
+  }
+  return (uint16_t)ticks;
 }
 
 static AxisState *find_axis(const char *key)
@@ -340,6 +401,11 @@ static AxisState *find_axis(const char *key)
 static AxisState *find_axis_by_driver_key(const char *key)
 {
   return find_axis(key);
+}
+
+static AxisState *b_axis_state(void)
+{
+  return &axes[1];
 }
 
 static ServoState *find_servo(const char *key)
@@ -554,6 +620,31 @@ static ByjStepperState *find_byj_stepper(const char *key)
 
 static void emit_byj_stepper_state(const ByjStepperState *stepper)
 {
+  if (strcmp(stepper->key, "byj1") == 0)
+  {
+    Byj1MotionSnapshot snapshot;
+    byj1_motion_get_snapshot(&snapshot);
+    printf("byj byj1 enabled %s moving %s pos %ld target %ld vel %ld endstop %s\r\n",
+           snapshot.enabled ? "on" : "off",
+           snapshot.moving ? "on" : "off",
+           (long)snapshot.position,
+           (long)snapshot.target,
+           (long)snapshot.velocity,
+           byj1_motion_endstop_triggered() ? "trig" : "clear");
+    return;
+  }
+  if (strcmp(stepper->key, "byj2") == 0)
+  {
+    Byj2MotionSnapshot snapshot;
+    byj2_motion_get_snapshot(&snapshot);
+    printf("byj byj2 enabled %s moving %s pos %ld target %ld vel %ld endstop clear\r\n",
+           snapshot.enabled ? "on" : "off",
+           snapshot.moving ? "on" : "off",
+           (long)snapshot.position,
+           (long)snapshot.target,
+           (long)snapshot.velocity);
+    return;
+  }
   printf("byj %s enabled %s moving %s pos %ld target %ld vel %ld endstop %s\r\n",
          stepper->key,
          stepper->enabled ? "on" : "off",
@@ -610,13 +701,12 @@ static void byj_begin_motion(ByjStepperState *stepper, int32_t velocity, int32_t
 
 static void pulse_byj_step(ByjStepperState *stepper, int32_t direction)
 {
-  const uint32_t cycles = 40U;
   HAL_GPIO_WritePin(stepper->dir_port, stepper->dir_pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  step_pulse_delay(cycles);
+  step_delay_us(20U);
   HAL_GPIO_WritePin(stepper->step_port, stepper->step_pin, GPIO_PIN_SET);
-  step_pulse_delay(cycles);
+  step_delay_us(40U);
   HAL_GPIO_WritePin(stepper->step_port, stepper->step_pin, GPIO_PIN_RESET);
-  step_pulse_delay(cycles);
+  step_delay_us(20U);
 }
 
 static void tick_byj_steppers(void)
@@ -624,11 +714,23 @@ static void tick_byj_steppers(void)
   uint32_t now_us = step_tick_now();
   size_t i;
 
+  byj1_motion_tick();
+  byj2_motion_tick();
+
   for (i = 0U; i < sizeof(byj_steppers) / sizeof(byj_steppers[0]); i++)
   {
     ByjStepperState *stepper = &byj_steppers[i];
     int32_t remaining;
     uint32_t decel_steps;
+
+    if (strcmp(stepper->key, "byj1") == 0)
+    {
+      continue;
+    }
+    if (strcmp(stepper->key, "byj2") == 0)
+    {
+      continue;
+    }
 
     if (!stepper->moving || !stepper->enabled)
     {
@@ -957,10 +1059,53 @@ static const char *axis_homing_state_name(const AxisState *axis)
   }
 }
 
+static const char *b_snapshot_homing_state_name(const BAxisMotionSnapshot *snapshot)
+{
+  switch (snapshot->homing_state)
+  {
+    case 1U:
+      return "seek_min";
+    case 2U:
+      return "release_min";
+    case 3U:
+      return "scan_seek_min";
+    case 4U:
+      return "scan_release_min";
+    case 5U:
+      return "scan_seek_max";
+    case 6U:
+      return "scan_release_max";
+    default:
+      return "idle";
+  }
+}
+
 static void emit_axis_state(const AxisState *axis)
 {
+  if (axis == b_axis_state())
+  {
+    BAxisMotionSnapshot snapshot;
+    b_axis_motion_get_snapshot(&snapshot);
+    printf(
+      "axis %s enabled %s moving %s pos %ld target %ld vel %ld homed %s homing %s endstop_min %s endstop_max %s travel %lu decel_window %lu\r\n",
+      axis->key,
+      snapshot.enabled ? "on" : "off",
+      snapshot.moving ? "on" : "off",
+      (long)snapshot.position,
+      (long)snapshot.target,
+      (long)snapshot.velocity,
+      snapshot.homed ? "yes" : "no",
+      b_snapshot_homing_state_name(&snapshot),
+      axis_min_endstop_triggered(axis) ? "trig" : "clear",
+      axis_max_endstop_triggered(axis) ? "trig" : "clear",
+      (unsigned long)snapshot.travel_steps,
+      (unsigned long)snapshot.decel_window_steps
+    );
+    return;
+  }
+
   printf(
-    "axis %s enabled %s moving %s pos %ld target %ld vel %ld homed %s homing %s endstop_min %s endstop_max %s\r\n",
+    "axis %s enabled %s moving %s pos %ld target %ld vel %ld homed %s homing %s endstop_min %s endstop_max %s travel %lu decel_window %lu\r\n",
     axis->key,
     axis->enabled ? "on" : "off",
     axis->moving ? "on" : "off",
@@ -970,7 +1115,9 @@ static void emit_axis_state(const AxisState *axis)
     axis->homed ? "yes" : "no",
     axis_homing_state_name(axis),
     axis_min_endstop_triggered(axis) ? "trig" : "clear",
-    axis_max_endstop_triggered(axis) ? "trig" : "clear"
+    axis_max_endstop_triggered(axis) ? "trig" : "clear",
+    (unsigned long)axis_effective_travel_steps(axis),
+    (unsigned long)axis->decel_window_steps
   );
 }
 
@@ -980,6 +1127,19 @@ static void emit_all_axis_states(void)
   for (i = 0U; i < sizeof(axes) / sizeof(axes[0]); i++)
   {
     emit_axis_state(&axes[i]);
+  }
+}
+
+static void emit_dirty_axis_states(void)
+{
+  size_t i;
+  for (i = 0U; i < sizeof(axes) / sizeof(axes[0]); i++)
+  {
+    if (axes[i].state_dirty)
+    {
+      axes[i].state_dirty = 0U;
+      emit_axis_state(&axes[i]);
+    }
   }
 }
 
@@ -1012,6 +1172,72 @@ static uint32_t step_ticks_from_us(uint16_t us)
   return cycles_per_us * (uint32_t)us;
 }
 
+static uint32_t axis_effective_travel_steps(const AxisState *axis)
+{
+  if (axis->tuned_travel_steps > 0U)
+  {
+    return axis->tuned_travel_steps;
+  }
+  if (axis->scan_travel_steps > 0)
+  {
+    return (uint32_t)axis->scan_travel_steps;
+  }
+  if (strcmp(axis->key, "b") == 0)
+  {
+    return B_TUNED_TRAVEL_STEPS;
+  }
+  return 0U;
+}
+
+static uint32_t axis_target_interval_us(const AxisState *axis)
+{
+  uint32_t travel_steps;
+  uint32_t distance_to_edge;
+  uint32_t decel_window_steps;
+  uint32_t ramp_span;
+
+  travel_steps = axis_effective_travel_steps(axis);
+  if (travel_steps == 0U)
+  {
+    return axis->cruise_interval_us;
+  }
+
+  if (strcmp(axis->key, "b") == 0)
+  {
+    decel_window_steps = axis->decel_window_steps;
+  }
+  else
+  {
+    return axis->cruise_interval_us;
+  }
+
+  if (decel_window_steps == 0U || axis->start_interval_us <= axis->cruise_interval_us)
+  {
+    return axis->cruise_interval_us;
+  }
+
+  if (axis->velocity > 0)
+  {
+    distance_to_edge = ((uint32_t)axis->position >= travel_steps) ? 0U : (travel_steps - (uint32_t)axis->position);
+  }
+  else if (axis->velocity < 0)
+  {
+    distance_to_edge = (axis->position <= 0) ? 0U : (uint32_t)axis->position;
+  }
+  else
+  {
+    return axis->start_interval_us;
+  }
+
+  if (distance_to_edge >= decel_window_steps)
+  {
+    return axis->cruise_interval_us;
+  }
+
+  ramp_span = axis->start_interval_us - axis->cruise_interval_us;
+  return axis->cruise_interval_us + (uint32_t)(((uint64_t)ramp_span * (uint64_t)(decel_window_steps - distance_to_edge)) / (uint64_t)decel_window_steps);
+}
+
 static uint32_t step_tick_now(void)
 {
   return DWT->CYCCNT;
@@ -1021,13 +1247,16 @@ static void axis_prime_motion_profile(AxisState *axis)
 {
   if (axis->homing_state != 0U)
   {
-    axis->step_interval_ticks = step_ticks_from_us(axis->homing_interval_us);
+    axis->step_interval_ticks = axis->homing_interval_us;
   }
   else
   {
-    axis->step_interval_ticks = step_ticks_from_us(axis->start_interval_us);
+    axis->step_interval_ticks = axis->start_interval_us;
   }
-  axis->next_step_tick = step_tick_now();
+  axis->timer_countdown_ticks = axis_timer_ticks_from_us(axis->step_interval_ticks);
+  axis->dir_setup_ticks = 0U;
+  axis->step_high_ticks = 0U;
+  axis->next_step_tick = 0U;
 }
 
 static void axis_begin_motion(AxisState *axis, int32_t velocity, int32_t target, uint8_t homing_state)
@@ -1040,6 +1269,26 @@ static void axis_begin_motion(AxisState *axis, int32_t velocity, int32_t target,
   {
     axis_prime_motion_profile(axis);
   }
+  else
+  {
+    axis->timer_countdown_ticks = 0U;
+    axis->dir_setup_ticks = 0U;
+    axis->step_high_ticks = 0U;
+    axis->next_step_tick = 0U;
+  }
+}
+
+static void axis_stop_motion(AxisState *axis)
+{
+  axis->target = axis->position;
+  axis->velocity = 0;
+  axis->moving = 0U;
+  axis->homing_state = 0U;
+  axis->next_step_tick = 0U;
+  axis->timer_countdown_ticks = 0U;
+  axis->dir_setup_ticks = 0U;
+  axis->step_high_ticks = 0U;
+  HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_RESET);
 }
 
 static void step_pulse_delay(uint32_t cycles)
@@ -1051,15 +1300,309 @@ static void step_pulse_delay(uint32_t cycles)
   }
 }
 
+static void step_delay_us(uint16_t us)
+{
+  uint32_t start = step_tick_now();
+  uint32_t ticks = step_ticks_from_us(us);
+  while ((uint32_t)(step_tick_now() - start) < ticks)
+  {
+  }
+}
+
 static void pulse_axis_step(AxisState *axis, int32_t direction)
 {
-  const uint32_t cycles = 40U;
   HAL_GPIO_WritePin(axis->dir_port, axis->dir_pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  step_pulse_delay(cycles);
-  HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_SET);
-  step_pulse_delay(cycles);
-  HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_RESET);
-  step_pulse_delay(cycles);
+  axis->dir_setup_ticks = 1U;
+  axis->step_high_ticks = 0U;
+}
+
+static void b_motion_start(int32_t direction, uint32_t steps, uint32_t interval_us, uint8_t stop_on_endstop)
+{
+  if (interval_us < 10U)
+  {
+    interval_us = 10U;
+  }
+
+  b_motion.direction = direction;
+  b_motion.steps_remaining = steps;
+  b_motion.moved_steps = 0U;
+  b_motion.interval_us = interval_us;
+  b_motion.current_interval_us = interval_us;
+  b_motion.stop_on_endstop = stop_on_endstop;
+  b_motion.continuous = 0U;
+  b_motion.pulse_high_phase = 0U;
+  b_motion.active = (steps > 0U) ? 1U : 0U;
+
+  if (b_motion.active != 0U)
+  {
+    HAL_TIM_Base_Stop_IT(&htim6);
+    HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    __HAL_TIM_SET_AUTORELOAD(&htim6, ((b_motion.current_interval_us > 5U) ? (b_motion.current_interval_us - 5U) : 10U) - 1U);
+    __HAL_TIM_SET_COUNTER(&htim6, 0U);
+    HAL_TIM_Base_Start_IT(&htim6);
+  }
+}
+
+static void b_motion_start_continuous(int32_t direction, uint32_t interval_us)
+{
+  if (interval_us < 10U)
+  {
+    interval_us = 10U;
+  }
+
+  b_motion.direction = direction;
+  b_motion.steps_remaining = 0U;
+  b_motion.moved_steps = 0U;
+  b_motion.interval_us = interval_us;
+  b_motion.current_interval_us = interval_us;
+  b_motion.stop_on_endstop = 1U;
+  b_motion.continuous = 1U;
+  b_motion.pulse_high_phase = 0U;
+  b_motion.active = 1U;
+
+  HAL_TIM_Base_Stop_IT(&htim6);
+  HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  __HAL_TIM_SET_AUTORELOAD(&htim6, ((b_motion.current_interval_us > 5U) ? (b_motion.current_interval_us - 5U) : 10U) - 1U);
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
+  HAL_TIM_Base_Start_IT(&htim6);
+}
+
+static void b_motion_stop(void)
+{
+  HAL_TIM_Base_Stop_IT(&htim6);
+  b_motion.active = 0U;
+  b_motion.continuous = 0U;
+  b_motion.pulse_high_phase = 0U;
+  b_motion.steps_remaining = 0U;
+  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+  __HAL_TIM_SET_AUTORELOAD(&htim6, 5U - 1U);
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
+  HAL_TIM_Base_Start_IT(&htim6);
+}
+
+static void b_motion_wait(void)
+{
+  while (b_motion.active != 0U)
+  {
+  }
+}
+
+static uint32_t b_run_steps(int32_t direction, uint32_t steps, uint16_t interval_us, uint8_t stop_on_endstop)
+{
+  b_motion_start(direction, steps, interval_us, stop_on_endstop);
+  b_motion_wait();
+  return b_motion.moved_steps;
+}
+
+static uint32_t b_target_interval_for_position(void)
+{
+  AxisState *axis = b_axis_state();
+  uint32_t distance_to_edge;
+  uint32_t ramp_span = (axis->start_interval_us > b_motion.interval_us) ? (axis->start_interval_us - b_motion.interval_us) : 0U;
+
+  if (b_motion.direction > 0)
+  {
+    distance_to_edge = ((uint32_t)axis->position >= axis_effective_travel_steps(axis)) ? 0U : (axis_effective_travel_steps(axis) - (uint32_t)axis->position);
+  }
+  else
+  {
+    distance_to_edge = (axis->position <= 0) ? 0U : (uint32_t)axis->position;
+  }
+
+  if (distance_to_edge >= axis->decel_window_steps || ramp_span == 0U)
+  {
+    return b_motion.interval_us;
+  }
+
+  return b_motion.interval_us + (uint32_t)(((uint64_t)ramp_span * (uint64_t)(axis->decel_window_steps - distance_to_edge)) / (uint64_t)axis->decel_window_steps);
+}
+
+static void b_home_blocking(void)
+{
+  AxisState *axis = b_axis_state();
+  uint32_t seek_steps = 0U;
+  uint32_t release_steps = 0U;
+
+  if (!axis->enabled)
+  {
+    uart_write_line("err axis disabled");
+    return;
+  }
+
+  axis->homed = 0U;
+  axis->homing_state = 1U;
+  axis->moving = 1U;
+  axis->velocity = -1;
+  axis->target = INT32_MIN;
+  printf("ok axis %s home\r\n", axis->key);
+  emit_axis_state(axis);
+
+  while (!axis_min_endstop_triggered(axis) && seek_steps < 50000U)
+  {
+    uint32_t moved = b_run_steps(-1, 200U, axis->homing_interval_us, 1U);
+    seek_steps += moved;
+    axis->homing_state = 1U;
+    axis->moving = 1U;
+    axis->velocity = -1;
+    axis->target = INT32_MIN;
+    if (moved == 0U)
+    {
+      break;
+    }
+  }
+
+  if (!axis_min_endstop_triggered(axis))
+  {
+    uart_write_line("err axis b home seek timeout");
+    axis_stop_motion(axis);
+    emit_axis_state(axis);
+    return;
+  }
+
+  axis->homing_state = 2U;
+  while (axis_min_endstop_triggered(axis) && release_steps < 8000U)
+  {
+    release_steps += b_run_steps(1, 100U, 1000U, 0U);
+    axis->homing_state = 2U;
+    axis->moving = 1U;
+    axis->velocity = 1;
+    axis->target = INT32_MAX;
+  }
+
+  if (axis_min_endstop_triggered(axis))
+  {
+    uart_write_line("err axis b home release timeout");
+    axis_stop_motion(axis);
+    emit_axis_state(axis);
+    return;
+  }
+
+  axis->position = 0;
+  axis->homed = 1U;
+  axis_stop_motion(axis);
+  printf("ok axis %s homed release_steps %lu\r\n", axis->key, (unsigned long)release_steps);
+  emit_axis_state(axis);
+}
+
+static void b_scan_blocking(void)
+{
+  AxisState *axis = b_axis_state();
+  uint32_t travel_steps = 0U;
+
+  b_home_blocking();
+  if (!axis->homed)
+  {
+    return;
+  }
+
+  axis->homing_state = 5U;
+  axis->moving = 1U;
+  axis->velocity = 1;
+  axis->target = INT32_MAX;
+  while (!axis_max_endstop_triggered(axis) && travel_steps < 60000U)
+  {
+    uint32_t moved = b_run_steps(1, 200U, axis->cruise_interval_us, 1U);
+    travel_steps += moved;
+    axis->homing_state = 5U;
+    axis->moving = 1U;
+    axis->velocity = 1;
+    axis->target = INT32_MAX;
+    if (moved == 0U)
+    {
+      break;
+    }
+  }
+
+  if (!axis_max_endstop_triggered(axis))
+  {
+    uart_write_line("err axis b scan seek_max timeout");
+    axis_stop_motion(axis);
+    emit_axis_state(axis);
+    return;
+  }
+
+  axis->scan_travel_steps = axis->position;
+  axis->tuned_travel_steps = (axis->position > 0) ? (uint32_t)axis->position : axis->tuned_travel_steps;
+  axis_stop_motion(axis);
+  printf("ok axis %s scan travel_steps %ld\r\n", axis->key, (long)axis->scan_travel_steps);
+  emit_axis_state(axis);
+}
+
+static void tick_b_motion_isr(void)
+{
+  AxisState *axis = b_axis_state();
+  uint32_t target_interval;
+
+  if (!b_motion.active || !axis->enabled)
+  {
+    b_motion_stop();
+    axis_stop_motion(axis);
+    return;
+  }
+
+  if (b_motion.pulse_high_phase == 0U)
+  {
+    if (b_motion.stop_on_endstop != 0U)
+    {
+      if (b_motion.direction < 0 && axis_min_endstop_triggered(axis))
+      {
+        b_motion_stop();
+        axis_stop_motion(axis);
+        axis->state_dirty = 1U;
+        return;
+      }
+      if (b_motion.direction > 0 && axis_max_endstop_triggered(axis))
+      {
+        b_motion_stop();
+        axis_stop_motion(axis);
+        axis->state_dirty = 1U;
+        return;
+      }
+    }
+
+    HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (b_motion.direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_SET);
+    b_motion.pulse_high_phase = 1U;
+    __HAL_TIM_SET_AUTORELOAD(&htim6, 5U - 1U);
+    __HAL_TIM_SET_COUNTER(&htim6, 0U);
+    return;
+  }
+
+  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+  b_motion.pulse_high_phase = 0U;
+  axis->position += b_motion.direction;
+  b_motion.moved_steps++;
+
+  if (b_motion.continuous != 0U)
+  {
+    target_interval = b_target_interval_for_position();
+    if (b_motion.current_interval_us > target_interval)
+    {
+      uint32_t delta = b_motion.current_interval_us - target_interval;
+      uint32_t next_interval = b_motion.current_interval_us - ((delta > axis->accel_interval_delta_us) ? axis->accel_interval_delta_us : delta);
+      b_motion.current_interval_us = next_interval;
+    }
+    else if (b_motion.current_interval_us < target_interval)
+    {
+      uint32_t next_interval = b_motion.current_interval_us + axis->accel_interval_delta_us;
+      b_motion.current_interval_us = (next_interval > target_interval) ? target_interval : next_interval;
+    }
+  }
+
+  if (b_motion.continuous == 0U && b_motion.steps_remaining > 0U)
+  {
+    b_motion.steps_remaining--;
+    if (b_motion.steps_remaining == 0U)
+    {
+      b_motion_stop();
+      axis_stop_motion(axis);
+      axis->state_dirty = 1U;
+      return;
+    }
+  }
+
+  __HAL_TIM_SET_AUTORELOAD(&htim6, ((b_motion.current_interval_us > 5U) ? (b_motion.current_interval_us - 5U) : 10U) - 1U);
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
 }
 
 static uint8_t tmc_crc8(const uint8_t *bytes, uint8_t len)
@@ -1261,8 +1804,8 @@ static void tmc_uart_boot_probe(void)
   tmc_emit_driver_status(&axes[0]);
   tmc_emit_driver_probe(axes[1].driver_addr);
   tmc_set_driver_stealth(&axes[1], 0U);
-  tmc_set_driver_microsteps(&axes[1], 16U);
-  tmc_set_driver_current(&axes[1], 600U);
+  tmc_set_driver_microsteps(&axes[1], 4U);
+  tmc_set_driver_current(&axes[1], 1000U);
   tmc_emit_driver_status(&axes[1]);
   tmc_uart_dump_raw(40U);
 }
@@ -1770,6 +2313,20 @@ static void process_command_line(char *line)
         }
         if (strcmp(tokens[3], "on") == 0)
         {
+          if (strcmp(stepper->key, "byj1") == 0)
+          {
+            byj1_motion_set_enabled(1U);
+            printf("ok byj %s enable on\r\n", stepper->key);
+            emit_byj_stepper_state(stepper);
+            return;
+          }
+          if (strcmp(stepper->key, "byj2") == 0)
+          {
+            byj2_motion_set_enabled(1U);
+            printf("ok byj %s enable on\r\n", stepper->key);
+            emit_byj_stepper_state(stepper);
+            return;
+          }
           stepper->enabled = 1U;
           apply_byj_stepper_enable(stepper);
           printf("ok byj %s enable on\r\n", stepper->key);
@@ -1778,6 +2335,20 @@ static void process_command_line(char *line)
         }
         if (strcmp(tokens[3], "off") == 0)
         {
+          if (strcmp(stepper->key, "byj1") == 0)
+          {
+            byj1_motion_set_enabled(0U);
+            printf("ok byj %s enable off\r\n", stepper->key);
+            emit_byj_stepper_state(stepper);
+            return;
+          }
+          if (strcmp(stepper->key, "byj2") == 0)
+          {
+            byj2_motion_set_enabled(0U);
+            printf("ok byj %s enable off\r\n", stepper->key);
+            emit_byj_stepper_state(stepper);
+            return;
+          }
           stepper->enabled = 0U;
           stepper->moving = 0U;
           stepper->velocity = 0;
@@ -1794,6 +2365,20 @@ static void process_command_line(char *line)
 
       if (strcmp(tokens[2], "stop") == 0)
       {
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          byj1_motion_stop();
+          printf("ok byj %s stop\r\n", stepper->key);
+          emit_byj_stepper_state(stepper);
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          byj2_motion_stop();
+          printf("ok byj %s stop\r\n", stepper->key);
+          emit_byj_stepper_state(stepper);
+          return;
+        }
         stepper->target = stepper->position;
         stepper->velocity = 0;
         stepper->moving = 0U;
@@ -1805,6 +2390,16 @@ static void process_command_line(char *line)
 
       if (strcmp(tokens[2], "home") == 0)
       {
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          byj1_motion_home();
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          byj2_motion_home();
+          return;
+        }
         if (stepper->enabled == 0U)
         {
           uart_write_line("err byj disabled");
@@ -1826,6 +2421,36 @@ static void process_command_line(char *line)
         if (token_count < 4U)
         {
           uart_write_line("err missing jog direction");
+          return;
+        }
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          if (strcmp(tokens[3], "+") == 0)
+          {
+            byj1_motion_jog(1);
+            return;
+          }
+          if (strcmp(tokens[3], "-") == 0)
+          {
+            byj1_motion_jog(-1);
+            return;
+          }
+          uart_write_line("err invalid jog direction");
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          if (strcmp(tokens[3], "+") == 0)
+          {
+            byj2_motion_jog(1);
+            return;
+          }
+          if (strcmp(tokens[3], "-") == 0)
+          {
+            byj2_motion_jog(-1);
+            return;
+          }
+          uart_write_line("err invalid jog direction");
           return;
         }
         if (stepper->enabled == 0U)
@@ -1859,12 +2484,22 @@ static void process_command_line(char *line)
           uart_write_line("err missing move delta");
           return;
         }
+        delta = strtol(tokens[3], NULL, 10);
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          byj1_motion_move_relative((int32_t)delta);
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          byj2_motion_move_relative((int32_t)delta);
+          return;
+        }
         if (stepper->enabled == 0U)
         {
           uart_write_line("err byj disabled");
           return;
         }
-        delta = strtol(tokens[3], NULL, 10);
         byj_begin_motion(stepper, (delta == 0) ? 0 : ((delta > 0) ? 1 : -1), stepper->position + (int32_t)delta);
         printf("ok byj %s move %ld\r\n", stepper->key, delta);
         emit_byj_stepper_state(stepper);
@@ -1879,12 +2514,22 @@ static void process_command_line(char *line)
           uart_write_line("err missing goto target");
           return;
         }
+        target = strtol(tokens[3], NULL, 10);
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          byj1_motion_goto((int32_t)target);
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          byj2_motion_goto((int32_t)target);
+          return;
+        }
         if (stepper->enabled == 0U)
         {
           uart_write_line("err byj disabled");
           return;
         }
-        target = strtol(tokens[3], NULL, 10);
         byj_begin_motion(stepper,
                          ((int32_t)target == stepper->position) ? 0 : (((int32_t)target > stepper->position) ? 1 : -1),
                          (int32_t)target);
@@ -2224,6 +2869,180 @@ static void process_command_line(char *line)
     return;
   }
 
+  if (axis == b_axis_state())
+  {
+    if (strcmp(tokens[2], "enable") == 0)
+    {
+      if (token_count < 4U)
+      {
+        uart_write_line("err missing enable state");
+        return;
+      }
+      if (strcmp(tokens[3], "on") == 0)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+        printf("ok axis %s enable on\r\n", axis->key);
+        emit_axis_state(axis);
+        return;
+      }
+      if (strcmp(tokens[3], "off") == 0)
+      {
+        axis->enabled = 0U;
+        b_axis_motion_set_enabled(0U);
+        apply_axis_enable_state();
+        printf("ok axis %s enable off\r\n", axis->key);
+        emit_axis_state(axis);
+        return;
+      }
+    }
+
+    if (strcmp(tokens[2], "home") == 0)
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      printf("ok axis %s home\r\n", axis->key);
+      b_axis_motion_home();
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "scan") == 0)
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      printf("ok axis %s scan\r\n", axis->key);
+      b_axis_motion_scan();
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "stop") == 0)
+    {
+      b_axis_motion_stop();
+      printf("ok axis %s stop\r\n", axis->key);
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "travel") == 0)
+    {
+      uint32_t travel_steps;
+      if (token_count < 4U)
+      {
+        uart_write_line("err missing travel steps");
+        return;
+      }
+      travel_steps = (uint32_t)strtoul(tokens[3], NULL, 10);
+      if (travel_steps < 100U)
+      {
+        uart_write_line("err invalid travel steps");
+        return;
+      }
+      axis->tuned_travel_steps = travel_steps;
+      axis->scan_travel_steps = (int32_t)travel_steps;
+      b_axis_motion_set_travel(travel_steps);
+      printf("ok axis %s travel %lu\r\n", axis->key, (unsigned long)travel_steps);
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "decel_window") == 0)
+    {
+      uint32_t decel_window_steps;
+      if (token_count < 4U)
+      {
+        uart_write_line("err missing decel window");
+        return;
+      }
+      decel_window_steps = (uint32_t)strtoul(tokens[3], NULL, 10);
+      if (decel_window_steps < 10U)
+      {
+        uart_write_line("err invalid decel window");
+        return;
+      }
+      axis->decel_window_steps = decel_window_steps;
+      b_axis_motion_set_decel_window(decel_window_steps);
+      printf("ok axis %s decel_window %lu\r\n", axis->key, (unsigned long)decel_window_steps);
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "jog") == 0)
+    {
+      if (token_count < 4U)
+      {
+        uart_write_line("err missing jog direction");
+        return;
+      }
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+      b_axis_motion_jog((strcmp(tokens[3], "-") == 0) ? -1 : 1);
+      printf("ok axis %s jog %s\r\n", axis->key, strcmp(tokens[3], "-") == 0 ? "-" : "+");
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "move") == 0)
+    {
+      long delta = 0;
+      if (token_count < 4U)
+      {
+        uart_write_line("err missing move delta");
+        return;
+      }
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      delta = strtol(tokens[3], NULL, 10);
+      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+      b_axis_motion_move_relative((int32_t)delta);
+      printf("ok axis %s move %ld\r\n", axis->key, delta);
+      emit_axis_state(axis);
+      return;
+    }
+
+    if (strcmp(tokens[2], "goto") == 0)
+    {
+      long target = 0;
+      long delta;
+      if (token_count < 4U)
+      {
+        uart_write_line("err missing goto target");
+        return;
+      }
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      target = strtol(tokens[3], NULL, 10);
+      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+      b_axis_motion_goto((int32_t)target);
+      printf("ok axis %s goto %ld\r\n", axis->key, target);
+      emit_axis_state(axis);
+      return;
+    }
+  }
+
   if (strcmp(tokens[2], "enable") == 0)
   {
     if (token_count < 4U)
@@ -2235,6 +3054,10 @@ static void process_command_line(char *line)
     {
       axis->enabled = 1U;
       apply_axis_enable_state();
+      if (axis->key[0] == 'b' && axis->key[1] == '\0')
+      {
+        b_axis_motion_set_enabled(1U);
+      }
       printf("ok axis %s enable on\r\n", axis->key);
       emit_axis_state(axis);
       return;
@@ -2242,11 +3065,11 @@ static void process_command_line(char *line)
     if (strcmp(tokens[3], "off") == 0)
     {
       axis->enabled = 0U;
-      axis->moving = 0U;
-      axis->velocity = 0;
-      axis->target = axis->position;
-      axis->homing_state = 0U;
-      axis->next_step_tick = 0U;
+      axis_stop_motion(axis);
+      if (axis->key[0] == 'b' && axis->key[1] == '\0')
+      {
+        b_axis_motion_set_enabled(0U);
+      }
       apply_axis_enable_state();
       printf("ok axis %s enable off\r\n", axis->key);
       emit_axis_state(axis);
@@ -2258,6 +3081,19 @@ static void process_command_line(char *line)
 
   if (strcmp(tokens[2], "home") == 0)
   {
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      printf("ok axis %s home\r\n", axis->key);
+      b_axis_motion_home();
+      emit_axis_state(axis);
+      return;
+    }
     if (axis->enabled == 0U)
     {
       uart_write_line("err axis disabled");
@@ -2272,6 +3108,19 @@ static void process_command_line(char *line)
 
   if (strcmp(tokens[2], "scan") == 0)
   {
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      printf("ok axis %s scan\r\n", axis->key);
+      b_axis_motion_scan();
+      emit_axis_state(axis);
+      return;
+    }
     if (axis->enabled == 0U)
     {
       uart_write_line("err axis disabled");
@@ -2287,12 +3136,64 @@ static void process_command_line(char *line)
 
   if (strcmp(tokens[2], "stop") == 0)
   {
-    axis->target = axis->position;
-    axis->velocity = 0;
-    axis->moving = 0U;
-    axis->homing_state = 0U;
-    axis->next_step_tick = 0U;
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      b_axis_motion_stop();
+      printf("ok axis %s stop\r\n", axis->key);
+      emit_axis_state(axis);
+      return;
+    }
+    axis_stop_motion(axis);
     printf("ok axis %s stop\r\n", axis->key);
+    emit_axis_state(axis);
+    return;
+  }
+
+  if (strcmp(tokens[2], "travel") == 0)
+  {
+    uint32_t travel_steps;
+    if (token_count < 4U)
+    {
+      uart_write_line("err missing travel steps");
+      return;
+    }
+    travel_steps = (uint32_t)strtoul(tokens[3], NULL, 10);
+    if (travel_steps < 100U)
+    {
+      uart_write_line("err invalid travel steps");
+      return;
+    }
+    axis->tuned_travel_steps = travel_steps;
+    axis->scan_travel_steps = (int32_t)travel_steps;
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      b_axis_motion_set_travel(travel_steps);
+    }
+    printf("ok axis %s travel %lu\r\n", axis->key, (unsigned long)travel_steps);
+    emit_axis_state(axis);
+    return;
+  }
+
+  if (strcmp(tokens[2], "decel_window") == 0)
+  {
+    uint32_t decel_window_steps;
+    if (token_count < 4U)
+    {
+      uart_write_line("err missing decel window");
+      return;
+    }
+    decel_window_steps = (uint32_t)strtoul(tokens[3], NULL, 10);
+    if (decel_window_steps < 10U)
+    {
+      uart_write_line("err invalid decel window");
+      return;
+    }
+    axis->decel_window_steps = decel_window_steps;
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      b_axis_motion_set_decel_window(decel_window_steps);
+    }
+    printf("ok axis %s decel_window %lu\r\n", axis->key, (unsigned long)decel_window_steps);
     emit_axis_state(axis);
     return;
   }
@@ -2308,6 +3209,32 @@ static void process_command_line(char *line)
     if (token_count < 4U)
     {
       uart_write_line("err missing jog direction");
+      return;
+    }
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+      if (strcmp(tokens[3], "+") == 0)
+      {
+        b_axis_motion_jog(1);
+        printf("ok axis %s jog +\r\n", axis->key);
+        emit_axis_state(axis);
+        return;
+      }
+      if (strcmp(tokens[3], "-") == 0)
+      {
+        b_axis_motion_jog(-1);
+        printf("ok axis %s jog -\r\n", axis->key);
+        emit_axis_state(axis);
+        return;
+      }
+      uart_write_line("err invalid jog direction");
       return;
     }
     if (axis->enabled == 0U)
@@ -2342,6 +3269,20 @@ static void process_command_line(char *line)
       return;
     }
     delta = strtol(tokens[3], NULL, 10);
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+      b_axis_motion_move_relative((int32_t)delta);
+      printf("ok axis %s move %ld\r\n", axis->key, delta);
+      emit_axis_state(axis);
+      return;
+    }
     if (axis->enabled == 0U)
     {
       uart_write_line("err axis disabled");
@@ -2362,6 +3303,20 @@ static void process_command_line(char *line)
       return;
     }
     target = strtol(tokens[3], NULL, 10);
+    if (axis->key[0] == 'b' && axis->key[1] == '\0')
+    {
+      if (axis->enabled == 0U)
+      {
+        axis->enabled = 1U;
+        apply_axis_enable_state();
+        b_axis_motion_set_enabled(1U);
+      }
+      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+      b_axis_motion_goto((int32_t)target);
+      printf("ok axis %s goto %ld\r\n", axis->key, target);
+      emit_axis_state(axis);
+      return;
+    }
     if (axis->enabled == 0U)
     {
       uart_write_line("err axis disabled");
@@ -2379,21 +3334,57 @@ static void process_command_line(char *line)
   uart_write_line("err unsupported command");
 }
 
-static void tick_axes(void)
+static void tick_axes_timer_isr(void)
 {
   size_t i;
-  const uint32_t now_us = step_tick_now();
   for (i = 0U; i < sizeof(axes) / sizeof(axes[0]); i++)
   {
     AxisState *axis = &axes[i];
+    uint32_t target_interval;
     int32_t remaining;
     uint32_t decel_steps;
+
+    if (axis == b_axis_state())
+    {
+      continue;
+    }
+
+    if (axis->step_high_ticks > 0U)
+    {
+      axis->step_high_ticks--;
+      if (axis->step_high_ticks == 0U)
+      {
+        HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_RESET);
+        axis->position += axis->velocity;
+        axis->timer_countdown_ticks = axis_timer_ticks_from_us(axis->step_interval_ticks);
+
+        if (axis->target != INT32_MAX && axis->target != INT32_MIN && axis->position == axis->target)
+        {
+          axis_stop_motion(axis);
+          axis->state_dirty = 1U;
+        }
+      }
+      continue;
+    }
+
+    if (axis->dir_setup_ticks > 0U)
+    {
+      axis->dir_setup_ticks--;
+      if (axis->dir_setup_ticks == 0U)
+      {
+        HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_SET);
+        axis->step_high_ticks = 2U;
+      }
+      continue;
+    }
+
     if (!axis->moving || !axis->enabled)
     {
       continue;
     }
-    if ((int32_t)(now_us - axis->next_step_tick) < 0)
+    if (axis->timer_countdown_ticks > 0U)
     {
+      axis->timer_countdown_ticks--;
       continue;
     }
     if (axis->homing_state == 1U)
@@ -2401,12 +3392,10 @@ static void tick_axes(void)
       if (axis_min_endstop_triggered(axis))
       {
         axis_begin_motion(axis, 1, INT32_MAX, 2U);
-        emit_axis_state(axis);
+        axis->state_dirty = 1U;
         continue;
       }
-      axis->position += axis->velocity;
       pulse_axis_step(axis, axis->velocity);
-      axis->next_step_tick = now_us + axis->step_interval_ticks;
       continue;
     }
     if (axis->homing_state == 2U)
@@ -2414,18 +3403,12 @@ static void tick_axes(void)
       if (!axis_min_endstop_triggered(axis))
       {
         axis->position = 0;
-        axis->target = 0;
-        axis->velocity = 0;
-        axis->moving = 0U;
-        axis->homing_state = 0U;
         axis->homed = 1U;
-        axis->next_step_tick = 0U;
-        emit_axis_state(axis);
+        axis_stop_motion(axis);
+        axis->state_dirty = 1U;
         continue;
       }
-      axis->position += axis->velocity;
       pulse_axis_step(axis, axis->velocity);
-      axis->next_step_tick = now_us + axis->step_interval_ticks;
       continue;
     }
     if (axis->homing_state == 3U)
@@ -2433,12 +3416,10 @@ static void tick_axes(void)
       if (axis_min_endstop_triggered(axis))
       {
         axis_begin_motion(axis, 1, INT32_MAX, 4U);
-        emit_axis_state(axis);
+        axis->state_dirty = 1U;
         continue;
       }
-      axis->position += axis->velocity;
       pulse_axis_step(axis, axis->velocity);
-      axis->next_step_tick = now_us + axis->step_interval_ticks;
       continue;
     }
     if (axis->homing_state == 4U)
@@ -2447,12 +3428,10 @@ static void tick_axes(void)
       {
         axis->position = 0;
         axis_begin_motion(axis, 1, INT32_MAX, 5U);
-        emit_axis_state(axis);
+        axis->state_dirty = 1U;
         continue;
       }
-      axis->position += axis->velocity;
       pulse_axis_step(axis, axis->velocity);
-      axis->next_step_tick = now_us + axis->step_interval_ticks;
       continue;
     }
     if (axis->homing_state == 5U)
@@ -2461,12 +3440,10 @@ static void tick_axes(void)
       {
         axis->scan_travel_steps = axis->position;
         axis_begin_motion(axis, -1, INT32_MIN, 6U);
-        emit_axis_state(axis);
+        axis->state_dirty = 1U;
         continue;
       }
-      axis->position += axis->velocity;
       pulse_axis_step(axis, axis->velocity);
-      axis->next_step_tick = now_us + axis->step_interval_ticks;
       continue;
     }
     if (axis->homing_state == 6U)
@@ -2474,45 +3451,31 @@ static void tick_axes(void)
       if (!axis_max_endstop_triggered(axis))
       {
         axis->position = axis->scan_travel_steps;
-        axis->target = axis->position;
-        axis->velocity = 0;
-        axis->moving = 0U;
-        axis->homing_state = 0U;
         axis->homed = 1U;
-        axis->next_step_tick = 0U;
+        axis_stop_motion(axis);
         printf("ok axis %s scan travel_steps %ld\r\n", axis->key, (long)axis->scan_travel_steps);
-        emit_axis_state(axis);
+        axis->state_dirty = 1U;
         continue;
       }
-      axis->position += axis->velocity;
       pulse_axis_step(axis, axis->velocity);
-      axis->next_step_tick = now_us + axis->step_interval_ticks;
       continue;
     }
     if (axis->position == axis->target)
     {
-      axis->moving = 0U;
-      axis->velocity = 0;
-      axis->next_step_tick = 0U;
-      emit_axis_state(axis);
+      axis_stop_motion(axis);
+      axis->state_dirty = 1U;
       continue;
     }
     if (axis->velocity < 0 && axis_min_endstop_triggered(axis))
     {
-      axis->target = axis->position;
-      axis->velocity = 0;
-      axis->moving = 0U;
-      axis->next_step_tick = 0U;
-      emit_axis_state(axis);
+      axis_stop_motion(axis);
+      axis->state_dirty = 1U;
       continue;
     }
     if (axis->velocity > 0 && axis_max_endstop_triggered(axis))
     {
-      axis->target = axis->position;
-      axis->velocity = 0;
-      axis->moving = 0U;
-      axis->next_step_tick = 0U;
-      emit_axis_state(axis);
+      axis_stop_motion(axis);
+      axis->state_dirty = 1U;
       continue;
     }
     remaining = axis->target - axis->position;
@@ -2523,11 +3486,12 @@ static void tick_axes(void)
     decel_steps = (uint32_t)((axis->start_interval_us - axis->cruise_interval_us) / axis->accel_interval_delta_us) + 2U;
     if (axis->target == INT32_MAX || axis->target == INT32_MIN)
     {
-      if (axis->step_interval_ticks > step_ticks_from_us(axis->cruise_interval_us))
+      target_interval = (axis->homing_state != 0U) ? axis->homing_interval_us : axis_target_interval_us(axis);
+      if (axis->step_interval_ticks > target_interval)
       {
         uint32_t next_interval = axis->step_interval_ticks;
-        uint32_t cruise_ticks = step_ticks_from_us(axis->cruise_interval_us);
-        uint32_t delta_ticks = step_ticks_from_us(axis->accel_interval_delta_us);
+        uint32_t cruise_ticks = target_interval;
+        uint32_t delta_ticks = axis->accel_interval_delta_us;
         if ((next_interval - cruise_ticks) > delta_ticks)
         {
           next_interval -= delta_ticks;
@@ -2538,22 +3502,27 @@ static void tick_axes(void)
         }
         axis->step_interval_ticks = next_interval;
       }
+      else if (axis->step_interval_ticks < target_interval)
+      {
+        uint32_t next_interval = axis->step_interval_ticks + axis->accel_interval_delta_us;
+        axis->step_interval_ticks = (next_interval > target_interval) ? target_interval : next_interval;
+      }
     }
     else if ((uint32_t)remaining <= decel_steps)
     {
-      uint32_t start_ticks = step_ticks_from_us(axis->start_interval_us);
-      uint32_t delta_ticks = step_ticks_from_us(axis->accel_interval_delta_us);
+      uint32_t start_ticks = axis->start_interval_us;
+      uint32_t delta_ticks = axis->accel_interval_delta_us;
       if (axis->step_interval_ticks < start_ticks)
       {
         uint32_t next_interval = axis->step_interval_ticks + delta_ticks;
         axis->step_interval_ticks = (next_interval > start_ticks) ? start_ticks : next_interval;
       }
     }
-    else if (axis->step_interval_ticks > step_ticks_from_us(axis->cruise_interval_us))
+    else if (axis->step_interval_ticks > axis->cruise_interval_us)
     {
       uint32_t next_interval = axis->step_interval_ticks;
-      uint32_t cruise_ticks = step_ticks_from_us(axis->cruise_interval_us);
-      uint32_t delta_ticks = step_ticks_from_us(axis->accel_interval_delta_us);
+      uint32_t cruise_ticks = axis->cruise_interval_us;
+      uint32_t delta_ticks = axis->accel_interval_delta_us;
       if ((next_interval - cruise_ticks) > delta_ticks)
       {
         next_interval -= delta_ticks;
@@ -2564,19 +3533,22 @@ static void tick_axes(void)
       }
       axis->step_interval_ticks = next_interval;
     }
-    axis->position += axis->velocity;
     pulse_axis_step(axis, axis->velocity);
-    axis->next_step_tick = now_us + axis->step_interval_ticks;
-    if (axis->target == INT32_MAX || axis->target == INT32_MIN)
+  }
+}
+
+static void tick_axes(void)
+{
+  emit_dirty_axis_states();
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM6)
+  {
+    if (b_axis_motion_active() != 0U)
     {
-      continue;
-    }
-    if (axis->position == axis->target)
-    {
-      axis->moving = 0U;
-      axis->velocity = 0;
-      axis->next_step_tick = 0U;
-      emit_axis_state(axis);
+      b_axis_motion_irq();
     }
   }
 }
@@ -2584,14 +3556,25 @@ static void tick_axes(void)
 
 int main(void)
 {
+  static const uint8_t boot_u1[] = "\r\nBOOT U1\r\n";
+  static const uint8_t boot_u3[] = "BOOT U3\r\n";
+  static const uint8_t boot_t3[] = "BOOT T3\r\n";
+  static const uint8_t boot_t4[] = "BOOT T4\r\n";
+  static const uint8_t boot_i2c[] = "BOOT I2C\r\n";
   HAL_Init();
   SystemClock_Config();
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t *)boot_u1, sizeof(boot_u1) - 1U, 0xFFFFU);
   MX_USART2_UART_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t *)boot_u3, sizeof(boot_u3) - 1U, 0xFFFFU);
   MX_TIM3_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t *)boot_t3, sizeof(boot_t3) - 1U, 0xFFFFU);
   MX_TIM4_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t *)boot_t4, sizeof(boot_t4) - 1U, 0xFFFFU);
+  MX_TIM6_Init();
   MX_I2C1_Init();
+  HAL_UART_Transmit(&huart1, (uint8_t *)boot_i2c, sizeof(boot_i2c) - 1U, 0xFFFFU);
 
   printf("\r\nSTM32G431RB #02 boot\r\n");
   printf("USART1 on PC4/PC5 via CN10-35/37, 115200 8N1\r\n");
@@ -2600,13 +3583,23 @@ int main(void)
   printf("servos fan1 PA6 fan2 PA7 pan1 PB6 pan2 PA1 lid PA4, 50Hz software PWM\r\n");
   printf("intel fans fan1 pwm PC6 tach PC9 fan2 pwm PC8 tach PB7, 25kHz open-drain pwm\r\n");
   printf("fan power relays fan1 PA12 fan2 PC1 active_high\r\n");
-  printf("byj steppers byj1 step PB12 dir PB13 en PB14 endstop PB3 byj2 step PB15 dir PC10 en PC11\r\n");
+  printf("byj steppers via step/dir drivers: byj1 step PB12 dir PB13 en PB14 endstop PB3 byj2 step PB15 dir PC10 en PC11\r\n");
   printf("magnet pwm PA11 via TIM4_CH1\r\n");
   printf("driver config a=%u b=%u\r\n", (unsigned)axes[0].driver_addr, (unsigned)axes[1].driver_addr);
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   DWT->CYCCNT = 0U;
-  oled_init_display();
+  b_axis_motion_init();
+  byj1_motion_init();
+  byj2_motion_init();
+  b_axis_motion_set_enabled(axes[1].enabled);
+  b_axis_motion_set_travel(axes[1].tuned_travel_steps);
+  b_axis_motion_set_decel_window(axes[1].decel_window_steps);
+  b_axis_motion_set_start_interval(axes[1].start_interval_us);
+  b_axis_motion_set_cruise_interval(axes[1].cruise_interval_us);
+  b_axis_motion_set_homing_interval(axes[1].homing_interval_us);
+  b_axis_motion_set_accel_delta(axes[1].accel_interval_delta_us);
+  /* Keep main firmware close to the proven B-axis test while debugging B motion. */
   tmc_uart_rx_start();
   tmc_uart_boot_probe();
 
@@ -2644,9 +3637,6 @@ int main(void)
 
     tick_axes();
     tick_byj_steppers();
-    tick_servos();
-    tick_intel_fans();
-    tick_oled();
 
     if (now_ms - last_led_toggle_ms >= 250U)
     {
@@ -2871,6 +3861,32 @@ static void MX_TIM4_Init(void)
   magnet_set_pwm(magnet.pwm_percent);
 }
 
+static void MX_TIM6_Init(void)
+{
+  uint32_t tim_clk_hz = tim3_input_clock_hz();
+  uint32_t prescaler = (tim_clk_hz / 1000000U);
+
+  if (prescaler == 0U)
+  {
+    prescaler = 1U;
+  }
+
+  __HAL_RCC_TIM6_CLK_ENABLE();
+
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = prescaler - 1U;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 5U - 1U;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+}
+
 static void MX_I2C1_Init(void)
 {
   hi2c1.Instance = I2C1;
@@ -2939,6 +3955,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(BYJ1_ENDSTOP_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
 
   GPIO_InitStruct.Pin = B_STEP_Pin;
   HAL_GPIO_Init(B_STEP_GPIO_Port, &GPIO_InitStruct);

@@ -1,4 +1,4 @@
-PROJECT := stm32_01_uart
+PROJECT := stm32_02_b_axis_test
 BUILD_DIR := build
 VENDOR := ../vendor/STM32CubeG4
 
@@ -26,9 +26,6 @@ LDLIBS := -Wl,--start-group -lc -lm -Wl,--end-group
 
 C_SOURCES := \
 	Src/main.c \
-	Src/b_axis_motion.c \
-	Src/byj1_motion.c \
-	Src/byj2_motion.c \
 	Src/syscalls.c \
 	Src/stm32g4xx_hal_msp.c \
 	Src/stm32g4xx_it.c \
@@ -42,8 +39,6 @@ C_SOURCES := \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_flash_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_flash_ramfunc.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_gpio.c \
-	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c.c \
-	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_rcc.c \

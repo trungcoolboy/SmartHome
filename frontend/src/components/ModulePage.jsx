@@ -11,6 +11,10 @@ function ModulePage({ page, alertFeed }) {
   const [bridgeState, setBridgeState] = useState(null);
   const [bridgeLogs, setBridgeLogs] = useState([]);
   const [bridgeError, setBridgeError] = useState("");
+  const [bAxisTravelSteps, setBAxisTravelSteps] = useState("");
+  const [bAxisDecelWindowSteps, setBAxisDecelWindowSteps] = useState("");
+  const [bAxisGotoPosition, setBAxisGotoPosition] = useState("");
+  const [bAxisCommandPending, setBAxisCommandPending] = useState(false);
   const [roomNodeState, setRoomNodeState] = useState(null);
   const [roomNodeError, setRoomNodeError] = useState("");
   const [roomNodeSecondaryState, setRoomNodeSecondaryState] = useState(null);
@@ -452,6 +456,19 @@ function ModulePage({ page, alertFeed }) {
     }
     setVolumeHudValue(clampVolume(liveVolume ?? 0));
   }, [liveVolume, volumeHudDragging]);
+
+  useEffect(() => {
+    const tuning = page.bridge?.bAxisTuning;
+    if (!tuning) {
+      setBAxisTravelSteps("");
+      setBAxisDecelWindowSteps("");
+      setBAxisGotoPosition("");
+      return;
+    }
+    setBAxisTravelSteps(String(tuning.defaultTravelSteps ?? ""));
+    setBAxisDecelWindowSteps(String(tuning.defaultDecelWindowSteps ?? ""));
+    setBAxisGotoPosition("");
+  }, [page.bridge?.bAxisTuning]);
 
   useEffect(() => {
     const baseUrl = getBridgeBaseUrl();
@@ -1076,6 +1093,81 @@ function ModulePage({ page, alertFeed }) {
     } catch (error) {
       setBridgeError(error.message);
     }
+  }
+
+  async function sendBridgeTextCommand(text) {
+    if (!page.bridge?.apiPath) {
+      return;
+    }
+    const commandText = String(text ?? "").trim();
+    if (!commandText) {
+      return;
+    }
+    const baseUrl = getBridgeBaseUrl();
+    try {
+      setBAxisCommandPending(true);
+      const response = await fetch(`${baseUrl}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: commandText }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `send ${response.status}`);
+      }
+      setBridgeError("");
+      window.setTimeout(() => {
+        refreshBridgeStatus();
+      }, 250);
+    } catch (error) {
+      setBridgeError(error.message);
+    } finally {
+      setBAxisCommandPending(false);
+    }
+  }
+
+  async function applyBAxisTravel() {
+    const value = Number.parseInt(bAxisTravelSteps, 10);
+    if (!Number.isFinite(value) || value < 100) {
+      setBridgeError("travel must be >= 100");
+      return;
+    }
+    await sendBridgeTextCommand(`axis b travel ${value}`);
+  }
+
+  async function applyBAxisDecelWindow() {
+    const value = Number.parseInt(bAxisDecelWindowSteps, 10);
+    if (!Number.isFinite(value) || value < 10) {
+      setBridgeError("decel window must be >= 10");
+      return;
+    }
+    await sendBridgeTextCommand(`axis b decel_window ${value}`);
+  }
+
+  async function applyBAxisGoto() {
+    const value = Number.parseInt(bAxisGotoPosition, 10);
+    if (!Number.isFinite(value)) {
+      setBridgeError("goto position is invalid");
+      return;
+    }
+    await sendBridgeTextCommand(`axis b goto ${value}`);
+  }
+
+  async function runBridgeCommandSequence(commands, delayMs = 180) {
+    for (const command of commands) {
+      await sendBridgeTextCommand(command);
+      if (delayMs > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  async function homeBAxis() {
+    await sendBridgeTextCommand("axis b home");
+  }
+
+  async function scanBAxisTravel() {
+    await sendBridgeTextCommand("axis b scan");
   }
 
   function focusFeaturedDevice() {
@@ -1982,6 +2074,63 @@ function ModulePage({ page, alertFeed }) {
                 </div>
               </div>
             </div>
+
+            {page.bridge?.bAxisTuning ? (
+              <div className="volume-card b-axis-tune-card">
+                <span>B Axis Tune</span>
+                <strong>STM32 #02 Motion</strong>
+                <p>Home, scan travel, set travel length, set decel window, and move to a target position.</p>
+                <div className="b-axis-tune-grid">
+                  <div className="next-step-card b-axis-tune-field">
+                    <span>Travel Steps</span>
+                    <input
+                      type="number"
+                      value={bAxisTravelSteps}
+                      onChange={(event) => setBAxisTravelSteps(event.target.value)}
+                      disabled={bAxisCommandPending}
+                    />
+                    <button className="ghost-pill" type="button" onClick={applyBAxisTravel} disabled={bAxisCommandPending}>
+                      Apply Travel
+                    </button>
+                  </div>
+                  <div className="next-step-card b-axis-tune-field">
+                    <span>Decel Window</span>
+                    <input
+                      type="number"
+                      value={bAxisDecelWindowSteps}
+                      onChange={(event) => setBAxisDecelWindowSteps(event.target.value)}
+                      disabled={bAxisCommandPending}
+                    />
+                    <button className="ghost-pill" type="button" onClick={applyBAxisDecelWindow} disabled={bAxisCommandPending}>
+                      Apply Decel
+                    </button>
+                  </div>
+                  <div className="next-step-card b-axis-tune-field">
+                    <span>Goto Position</span>
+                    <input
+                      type="number"
+                      value={bAxisGotoPosition}
+                      onChange={(event) => setBAxisGotoPosition(event.target.value)}
+                      disabled={bAxisCommandPending}
+                    />
+                    <button className="ghost-pill" type="button" onClick={applyBAxisGoto} disabled={bAxisCommandPending}>
+                      Go To
+                    </button>
+                  </div>
+                </div>
+                <div className="featured-action-group b-axis-tune-actions">
+                  <button className="ghost-pill" type="button" onClick={homeBAxis} disabled={bAxisCommandPending}>
+                    Home B
+                  </button>
+                  <button className="ghost-pill" type="button" onClick={scanBAxisTravel} disabled={bAxisCommandPending}>
+                    Scan Travel
+                  </button>
+                  <button className="ghost-pill" type="button" onClick={() => sendBridgeTextCommand("status")} disabled={bAxisCommandPending}>
+                    Refresh Motion
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}
