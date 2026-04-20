@@ -26,6 +26,8 @@ TV_ROUTE_PREFIX = "/api/tv/living-room"
 ROOM_NODE_CONFIGS = [
     ("/api/node/living-room-01", "living-room-node-01"),
     ("/api/node/living-room-02", "living-room-node-02"),
+    ("/api/node/bedroom-2-01", "bedroom-2-node-01"),
+    ("/api/node/bedroom-2-02", "bedroom-2-node-02"),
 ]
 TV_STALE_AFTER_SECONDS = 20.0
 
@@ -56,6 +58,7 @@ class RoomNodeState:
     relays: dict[str, bool] = field(default_factory=dict)
     touches: dict[str, bool] = field(default_factory=dict)
     led_mode: str | None = None
+    remote_relay: bool | None = None
     log: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=100))
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -76,6 +79,7 @@ class RoomNodeState:
                 "relays": dict(self.relays),
                 "touches": dict(self.touches),
                 "ledMode": self.led_mode,
+                "remoteRelay": self.remote_relay,
                 "uptimeSeconds": round(time.time() - self.boot_time, 3),
             }
 
@@ -171,6 +175,8 @@ class RoomNodeRuntime:
                     self.state.wifi_rssi = data.get("wifiRssi", self.state.wifi_rssi)
                     self.state.free_heap = data.get("freeHeap", self.state.free_heap)
                     self.state.led_mode = data.get("ledMode", self.state.led_mode)
+                    if "remoteRelay" in data:
+                        self.state.remote_relay = bool(data.get("remoteRelay"))
                     if "relay" in data:
                         self.state.relays["relay"] = bool(data.get("relay"))
                     if "touch" in data:
@@ -252,6 +258,32 @@ def build_tv_snapshot(state: TvState) -> dict[str, Any]:
     return snapshot
 
 
+def build_tv_apps_snapshot(state: TvState) -> dict[str, Any]:
+    snapshot = state.snapshot()
+    return {
+        "tvId": snapshot.get("tvId"),
+        "host": snapshot.get("host"),
+        "reachable": snapshot.get("reachable"),
+        "paired": snapshot.get("paired"),
+        "foregroundAppId": snapshot.get("foregroundAppId"),
+        "launchPoints": snapshot.get("launchPoints", []),
+        "apps": snapshot.get("apps", []),
+        "appsLastSeen": snapshot.get("appsLastSeen"),
+        "appsLastError": snapshot.get("appsLastError"),
+        "lastError": snapshot.get("lastError"),
+    }
+
+
+def build_tv_app_history(event_store: EventStore, state: TvState, limit: int = 20) -> dict[str, Any]:
+    items = event_store.recent_events(
+        limit=limit,
+        source_type="tv",
+        source_id=state.tv_id,
+        event_type="app_session",
+    )
+    return {"tvId": state.tv_id, "items": items}
+
+
 def start_integrated_tv_probe_loop(
     bridge: WebOsTvBridge,
     state: TvState,
@@ -261,6 +293,48 @@ def start_integrated_tv_probe_loop(
 ) -> threading.Thread:
     def _stable_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in snapshot.items() if key != "uptimeSeconds"}
+
+    def _record_app_transition(previous_snapshot: dict[str, Any], current_snapshot: dict[str, Any], now: float) -> None:
+        if event_store is None:
+            return
+        previous_id = previous_snapshot.get("foregroundAppId")
+        current_id = current_snapshot.get("foregroundAppId")
+        if previous_id == current_id:
+            return
+        previous_started_at = previous_snapshot.get("foregroundAppStartedAt")
+        previous_title = previous_snapshot.get("foregroundAppTitle") or previous_id
+        current_title = current_snapshot.get("foregroundAppTitle") or current_id
+
+        if previous_id and previous_started_at:
+            duration_seconds = max(0.0, now - float(previous_started_at))
+            event_store.record(
+                source_type="tv",
+                source_id=state.tv_id,
+                event_type="app_session",
+                payload_json={
+                    "appId": previous_id,
+                    "title": previous_title,
+                    "startedAt": previous_started_at,
+                    "endedAt": now,
+                    "durationSeconds": duration_seconds,
+                    "durationMinutes": round(duration_seconds / 60.0, 3),
+                },
+                state=current_snapshot,
+            )
+        if current_id:
+            event_store.record(
+                source_type="tv",
+                source_id=state.tv_id,
+                event_type="app_transition",
+                payload_json={
+                    "previousAppId": previous_id,
+                    "previousTitle": previous_title,
+                    "currentAppId": current_id,
+                    "currentTitle": current_title,
+                    "startedAt": current_snapshot.get("foregroundAppStartedAt"),
+                },
+                state=current_snapshot,
+            )
 
     def _run() -> None:
         last_snapshot = ""
@@ -283,7 +357,10 @@ def start_integrated_tv_probe_loop(
                     and not bridge.io_lock.locked()
                 ):
                     try:
+                        previous_snapshot = build_tv_snapshot(state)
                         bridge.refresh()
+                        current_snapshot = build_tv_snapshot(state)
+                        _record_app_transition(previous_snapshot, current_snapshot, now)
                     except Exception as exc:
                         with state.lock:
                             state.last_error = str(exc)
@@ -453,6 +530,17 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == f"{TV_ROUTE_PREFIX}/status":
             self._json(HTTPStatus.OK, build_tv_snapshot(self._require_tv_state()))
             return
+        if parsed.path == f"{TV_ROUTE_PREFIX}/apps":
+            if self.command == "GET":
+                self._json(HTTPStatus.OK, build_tv_apps_snapshot(self._require_tv_state()))
+                return
+            self._tv_action("apps")
+            return
+        if parsed.path == f"{TV_ROUTE_PREFIX}/app-history":
+            params = parse_qs(parsed.query)
+            limit = max(1, min(int(params.get("limit", ["20"])[0]), 100))
+            self._json(HTTPStatus.OK, build_tv_app_history(self._require_event_store(), self._require_tv_state(), limit))
+            return
         if parsed.path == f"{TV_ROUTE_PREFIX}/events":
             self._tv_sse()
             return
@@ -542,6 +630,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = bridge.pair()
             elif action == "refresh":
                 result = bridge.refresh()
+            elif action == "apps":
+                result = bridge.list_apps()
             elif action == "command":
                 result = bridge.send_command(body)
             else:

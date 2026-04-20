@@ -7,6 +7,7 @@
 #define BYJ2_STEP_HIGH_US            40U
 #define BYJ2_STEP_LOW_HOLD_US        20U
 #define BYJ2_MIN_INTERVAL_US         15U
+#define BYJ2_ENABLE_SETTLE_US      5000U
 
 typedef struct
 {
@@ -32,9 +33,9 @@ static Byj2MotionState byj2 = {
   .velocity = 0,
   .next_step_tick = 0U,
   .step_interval_ticks = 0U,
-  .start_interval_us = 64U,
-  .cruise_interval_us = 16U,
-  .accel_interval_delta_us = 2U,
+  .start_interval_us = 2200U,
+  .cruise_interval_us = 900U,
+  .accel_interval_delta_us = 40U,
 };
 static uint32_t byj2_tick_now(void)
 {
@@ -121,6 +122,7 @@ void byj2_motion_init(void)
 
 void byj2_motion_set_enabled(uint8_t enabled)
 {
+  uint8_t was_enabled = byj2.enabled;
   byj2.enabled = enabled ? 1U : 0U;
   if (byj2.enabled == 0U)
   {
@@ -130,6 +132,10 @@ void byj2_motion_set_enabled(uint8_t enabled)
     byj2.next_step_tick = 0U;
   }
   byj2_apply_enable();
+  if (!was_enabled && byj2.enabled)
+  {
+    byj2_delay_us(BYJ2_ENABLE_SETTLE_US);
+  }
 }
 
 void byj2_motion_stop(void)

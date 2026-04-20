@@ -8,7 +8,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "a_axis_motion.h"
 #include "b_axis_motion.h"
+#include "servo_control.h"
+#include "fan_control.h"
+#include "axis_travel_store.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -22,10 +26,14 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim6;
-I2C_HandleTypeDef hi2c1;
+TIM_HandleTypeDef htim8;
+TIM_HandleTypeDef htim16;
+TIM_HandleTypeDef htim17;
 
 /* USER CODE BEGIN PV */
 typedef struct
@@ -66,21 +74,9 @@ typedef struct
   uint8_t tmc_shadow_valid;
 } AxisState;
 
-#define B_TUNED_TRAVEL_STEPS        22991U
+#define A_TUNED_TRAVEL_STEPS        49983U
+#define B_TUNED_TRAVEL_STEPS         5656U
 #define B_TUNED_DECEL_WINDOW_STEPS    300U
-
-typedef struct
-{
-  volatile uint8_t active;
-  volatile int32_t direction;
-  volatile uint32_t steps_remaining;
-  volatile uint32_t moved_steps;
-  volatile uint32_t interval_us;
-  volatile uint32_t current_interval_us;
-  volatile uint8_t stop_on_endstop;
-  volatile uint8_t continuous;
-  volatile uint8_t pulse_high_phase;
-} BMotionState;
 
 static AxisState axes[] = {
   {
@@ -94,8 +90,8 @@ static AxisState axes[] = {
     .max_endstop_port = A_MAX_ENDSTOP_GPIO_Port,
     .max_endstop_pin = A_MAX_ENDSTOP_Pin,
     .driver_addr = 0U,
-    .scan_travel_steps = 0,
-    .tuned_travel_steps = 0U,
+    .scan_travel_steps = (int32_t)A_TUNED_TRAVEL_STEPS,
+    .tuned_travel_steps = A_TUNED_TRAVEL_STEPS,
     .decel_window_steps = 0U,
     .start_interval_us = 600U,
     .cruise_interval_us = 80U,
@@ -123,55 +119,48 @@ static AxisState axes[] = {
   },
 };
 
-static BMotionState b_motion = {0};
+typedef struct
+{
+  volatile uint8_t active;
+  volatile uint8_t pulse_high_phase;
+  volatile uint32_t cruise_interval_us;
+  volatile uint32_t current_interval_us;
+  volatile uint32_t start_interval_us;
+  volatile uint32_t accel_delta_us;
+  volatile uint32_t steps_total;
+  volatile uint32_t steps_done;
+  volatile uint32_t a_abs_steps;
+  volatile uint32_t b_abs_steps;
+  volatile uint32_t a_err;
+  volatile uint32_t b_err;
+  volatile int32_t a_direction;
+  volatile int32_t b_direction;
+  volatile int32_t a_position;
+  volatile int32_t b_position;
+  volatile int32_t a_target;
+  volatile int32_t b_target;
+  volatile uint8_t a_step_pending;
+  volatile uint8_t b_step_pending;
+} CoordMotionState;
+
+static CoordMotionState coord_motion = {0};
+
+#define AB_COORD_START_INTERVAL_US   1400U
+#define AB_COORD_CRUISE_INTERVAL_US   150U
+#define AB_COORD_ACCEL_DELTA_US         8U
+#define AB_COORD_MIN_RAMP_STEPS       900U
 
 static volatile uint8_t tmc_rx_ring[64];
 static volatile uint16_t tmc_rx_head = 0U;
 static volatile uint16_t tmc_rx_tail = 0U;
 static uint8_t tmc_rx_byte = 0U;
+static volatile uint8_t host_rx_ring[128];
+static volatile uint16_t host_rx_head = 0U;
+static volatile uint16_t host_rx_tail = 0U;
+static uint8_t host_rx_byte = 0U;
 
-typedef struct
-{
-  const char *key;
-  uint32_t pwm_channel;
-  GPIO_TypeDef *tach_port;
-  uint16_t tach_pin;
-  uint8_t pwm_percent;
-  uint8_t tach_last_level;
-  uint32_t tach_edges_total;
-  uint32_t tach_edges_sample;
-  uint32_t rpm;
-} IntelFanState;
-
-static IntelFanState intel_fans[] = {
-  {.key = "fan1", .pwm_channel = TIM_CHANNEL_1, .tach_port = INTEL_FAN1_TACH_GPIO_Port, .tach_pin = INTEL_FAN1_TACH_Pin, .pwm_percent = 0U},
-  {.key = "fan2", .pwm_channel = TIM_CHANNEL_3, .tach_port = INTEL_FAN2_TACH_GPIO_Port, .tach_pin = INTEL_FAN2_TACH_Pin, .pwm_percent = 0U},
-};
-
-static uint32_t intel_fan_sample_tick_ms = 0U;
-
-typedef struct
-{
-  uint8_t pwm_percent;
-} MagnetState;
-
-static MagnetState magnet = {
-  .pwm_percent = 0U,
-};
-
-typedef struct
-{
-  const char *key;
-  GPIO_TypeDef *port;
-  uint16_t pin;
-  uint8_t active_high;
-  uint8_t on;
-} FanPowerRelayState;
-
-static FanPowerRelayState fan_power_relays[] = {
-  {.key = "fan1", .port = FAN1_POWER_RELAY_GPIO_Port, .pin = FAN1_POWER_RELAY_Pin, .active_high = 1U, .on = 0U},
-  {.key = "fan2", .port = FAN2_POWER_RELAY_GPIO_Port, .pin = FAN2_POWER_RELAY_Pin, .active_high = 1U, .on = 0U},
-};
+#define BYJ1_CAL_STEPS_PER_42MM     50000L
+#define BYJ1_CAL_MM_X1000_PER_42MM  42000L
 
 typedef struct
 {
@@ -219,41 +208,26 @@ static ByjStepperState byj_steppers[] = {
     .dir_pin = BYJ2_DIR_Pin,
     .en_port = BYJ2_EN_GPIO_Port,
     .en_pin = BYJ2_EN_Pin,
-    .start_interval_us = 125U,
-    .cruise_interval_us = 31U,
-    .accel_interval_delta_us = 3U,
+    .start_interval_us = 2200U,
+    .cruise_interval_us = 900U,
+    .accel_interval_delta_us = 40U,
   },
 };
 
-typedef struct
+static int32_t byj1_mm_x1000_from_steps(int32_t steps)
 {
-  const char *key;
-  GPIO_TypeDef *port;
-  uint16_t pin;
-  uint16_t pulse_us;
-  uint16_t frame_active;
-} ServoState;
+  int64_t scaled = (int64_t)steps * (int64_t)BYJ1_CAL_MM_X1000_PER_42MM;
+  if (scaled >= 0)
+  {
+    scaled += (BYJ1_CAL_STEPS_PER_42MM / 2);
+  }
+  else
+  {
+    scaled -= (BYJ1_CAL_STEPS_PER_42MM / 2);
+  }
+  return (int32_t)(scaled / BYJ1_CAL_STEPS_PER_42MM);
+}
 
-static ServoState servos[] = {
-  {.key = "fan1", .port = FAN1_SERVO_GPIO_Port, .pin = FAN1_SERVO_Pin, .pulse_us = 1500U, .frame_active = 0U},
-  {.key = "fan2", .port = FAN2_SERVO_GPIO_Port, .pin = FAN2_SERVO_Pin, .pulse_us = 1500U, .frame_active = 0U},
-  {.key = "pan1", .port = PAN1_SERVO_GPIO_Port, .pin = PAN1_SERVO_Pin, .pulse_us = 1500U, .frame_active = 0U},
-  {.key = "pan2", .port = PAN2_SERVO_GPIO_Port, .pin = PAN2_SERVO_Pin, .pulse_us = 1500U, .frame_active = 0U},
-  {.key = "lid", .port = LID_SERVO_GPIO_Port, .pin = LID_SERVO_Pin, .pulse_us = 1500U, .frame_active = 0U},
-};
-
-static uint32_t servo_frame_start_tick = 0U;
-static uint8_t servo_frame_started = 0U;
-
-#define OLED_I2C_ADDR          (0x3CU << 1)
-#define OLED_WIDTH             128U
-#define OLED_HEIGHT            64U
-#define OLED_PAGE_COUNT        8U
-#define OLED_COLUMN_OFFSET     2U
-
-static uint8_t oled_buffer[OLED_WIDTH * OLED_PAGE_COUNT];
-static uint8_t oled_ready = 0U;
-static uint32_t oled_last_refresh_ms = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -261,10 +235,14 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM6_Init(void);
-static void MX_I2C1_Init(void);
+static void MX_TIM8_Init(void);
+static void MX_TIM16_Init(void);
+static void MX_TIM17_Init(void);
 /* USER CODE BEGIN PFP */
 #if defined(__ICCARM__)
 int iar_fputc(int ch);
@@ -284,10 +262,8 @@ static void emit_all_axis_states(void);
 static void emit_dirty_axis_states(void);
 static void emit_tmc_status(void);
 static void apply_axis_enable_state(void);
-static void pulse_axis_step(AxisState *axis, int32_t direction);
 static uint32_t step_ticks_from_us(uint16_t us);
 static uint32_t step_tick_now(void);
-static void step_pulse_delay(uint32_t cycles);
 static void axis_prime_motion_profile(AxisState *axis);
 static void axis_begin_motion(AxisState *axis, int32_t velocity, int32_t target, uint8_t homing_state);
 static uint8_t tmc_crc8(const uint8_t *bytes, uint8_t len);
@@ -301,6 +277,7 @@ static void tmc_set_driver_current(AxisState *axis, uint32_t target_ma);
 static void tmc_set_driver_microsteps(AxisState *axis, uint16_t microsteps);
 static void tmc_set_driver_stealth(AxisState *axis, uint8_t enable);
 static void tmc_uart_rx_start(void);
+static void host_uart_rx_start(void);
 static HAL_StatusTypeDef tmc_uart_send_bytes(const uint8_t *bytes, uint16_t len);
 static HAL_StatusTypeDef tmc_uart_write_bytes(const uint8_t *bytes, uint16_t len);
 static HAL_StatusTypeDef tmc_uart_write_reg_checked(uint8_t driver_addr, uint8_t reg_addr, uint32_t reg_value, uint8_t *ifcnt_before_out, uint8_t *ifcnt_after_out);
@@ -308,27 +285,12 @@ static int16_t tmc_uart_read_byte(uint32_t timeout_ms);
 static HAL_StatusTypeDef tmc_uart_read_exact(uint8_t *bytes, uint16_t len, uint32_t timeout_ms);
 static void tmc_uart_flush_rx(void);
 static void tmc_uart_dump_raw(uint32_t window_ms);
+static void host_uart_clear_errors(void);
 static void tmc_uart_boot_probe(void);
 static HAL_StatusTypeDef tmc_uart_read_reg(uint8_t driver_addr, uint8_t reg_addr, uint32_t *value_out);
 static HAL_StatusTypeDef tmc_uart_write_reg(uint8_t driver_addr, uint8_t reg_addr, uint32_t reg_value);
 static void tmc_emit_driver_probe(uint8_t driver_addr);
-static ServoState *find_servo(const char *key);
-static uint16_t servo_angle_to_us(uint16_t angle_deg);
-static uint16_t servo_us_to_angle(uint16_t pulse_us);
-static void emit_all_servo_states(void);
-static void tick_servos(void);
-static IntelFanState *find_intel_fan(const char *key);
 static uint32_t tim3_input_clock_hz(void);
-static void intel_fan_apply_pwm(IntelFanState *fan);
-static void intel_fan_set_pwm(IntelFanState *fan, uint8_t pwm_percent);
-static void emit_all_fan_states(void);
-static void tick_intel_fans(void);
-static void magnet_apply_pwm(void);
-static void magnet_set_pwm(uint8_t pwm_percent);
-static void emit_magnet_state(void);
-static FanPowerRelayState *find_fan_power_relay(const char *key);
-static void apply_fan_power_relay(FanPowerRelayState *relay);
-static void emit_all_fan_power_relays(void);
 static ByjStepperState *find_byj_stepper(const char *key);
 static void emit_byj_stepper_state(const ByjStepperState *stepper);
 static void emit_all_byj_stepper_states(void);
@@ -339,29 +301,16 @@ static uint8_t read_byj_endstop_triggered(const ByjStepperState *stepper);
 static void step_delay_us(uint16_t us);
 static void pulse_byj_step(ByjStepperState *stepper, int32_t direction);
 static void tick_byj_steppers(void);
-static HAL_StatusTypeDef oled_write_command(uint8_t cmd);
-static HAL_StatusTypeDef oled_write_data(const uint8_t *data, uint16_t len);
-static void oled_clear_buffer(void);
-static const uint8_t *oled_glyph_for_char(char c);
-static void oled_draw_char(uint8_t x, uint8_t page, char c);
-static void oled_draw_text(uint8_t x, uint8_t page, const char *text);
-static void oled_flush(void);
-static void oled_init_display(void);
-static void tick_oled(void);
 static void process_command_line(char *line);
 static void tick_axes(void);
-static void tick_axes_timer_isr(void);
 static void axis_stop_motion(AxisState *axis);
+static uint8_t coord_motion_active(void);
+static void coord_motion_stop(void);
+static void coord_motion_irq(void);
+static uint8_t coord_motion_start(int32_t a_target, int32_t b_target);
+static void coord_motion_emit_state(void);
+static uint32_t coord_motion_ease_interval(uint32_t phase_steps, uint32_t ramp_steps, uint32_t start_interval_us, uint32_t cruise_interval_us);
 static AxisState *b_axis_state(void);
-static void b_motion_start(int32_t direction, uint32_t steps, uint32_t interval_us, uint8_t stop_on_endstop);
-static void b_motion_start_continuous(int32_t direction, uint32_t interval_us);
-static void b_motion_stop(void);
-static void b_motion_wait(void);
-static uint32_t b_run_steps(int32_t direction, uint32_t steps, uint16_t interval_us, uint8_t stop_on_endstop);
-static uint32_t b_target_interval_for_position(void);
-static void b_home_blocking(void);
-static void b_scan_blocking(void);
-static void tick_b_motion_isr(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -369,6 +318,11 @@ static void tick_b_motion_isr(void);
 static void uart_write_line(const char *text)
 {
   printf("%s\r\n", text);
+}
+
+static void host_uart_rx_start(void)
+{
+  HAL_UART_Receive_IT(&huart1, &host_rx_byte, 1U);
 }
 
 static uint16_t axis_timer_ticks_from_us(uint32_t us)
@@ -408,66 +362,6 @@ static AxisState *b_axis_state(void)
   return &axes[1];
 }
 
-static ServoState *find_servo(const char *key)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-  {
-    if (strcmp(servos[i].key, key) == 0)
-    {
-      return &servos[i];
-    }
-  }
-  return NULL;
-}
-
-static uint16_t servo_angle_to_us(uint16_t angle_deg)
-{
-  if (angle_deg > 180U)
-  {
-    angle_deg = 180U;
-  }
-  return (uint16_t)(500U + ((uint32_t)angle_deg * 2000U) / 180U);
-}
-
-static uint16_t servo_us_to_angle(uint16_t pulse_us)
-{
-  if (pulse_us <= 500U)
-  {
-    return 0U;
-  }
-  if (pulse_us >= 2500U)
-  {
-    return 180U;
-  }
-  return (uint16_t)(((uint32_t)(pulse_us - 500U) * 180U) / 2000U);
-}
-
-static void emit_all_servo_states(void)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-  {
-    printf("servo %s us %u angle %u\r\n",
-           servos[i].key,
-           (unsigned)servos[i].pulse_us,
-           (unsigned)servo_us_to_angle(servos[i].pulse_us));
-  }
-}
-
-static IntelFanState *find_intel_fan(const char *key)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(intel_fans) / sizeof(intel_fans[0]); i++)
-  {
-    if (strcmp(intel_fans[i].key, key) == 0)
-    {
-      return &intel_fans[i];
-    }
-  }
-  return NULL;
-}
-
 static uint32_t tim3_input_clock_hz(void)
 {
   RCC_ClkInitTypeDef clk_init = {0};
@@ -480,129 +374,6 @@ static uint32_t tim3_input_clock_hz(void)
     return pclk1_hz;
   }
   return pclk1_hz * 2U;
-}
-
-static void intel_fan_apply_pwm(IntelFanState *fan)
-{
-  uint32_t compare = ((__HAL_TIM_GET_AUTORELOAD(&htim3) + 1U) * (uint32_t)fan->pwm_percent) / 100U;
-  __HAL_TIM_SET_COMPARE(&htim3, fan->pwm_channel, compare);
-}
-
-static void intel_fan_set_pwm(IntelFanState *fan, uint8_t pwm_percent)
-{
-  if (pwm_percent > 100U)
-  {
-    pwm_percent = 100U;
-  }
-  fan->pwm_percent = pwm_percent;
-  intel_fan_apply_pwm(fan);
-}
-
-static void emit_all_fan_states(void)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(intel_fans) / sizeof(intel_fans[0]); i++)
-  {
-    printf("fan %s pwm %u rpm %lu tach_edges %lu\r\n",
-           intel_fans[i].key,
-           (unsigned)intel_fans[i].pwm_percent,
-           (unsigned long)intel_fans[i].rpm,
-           (unsigned long)intel_fans[i].tach_edges_total);
-  }
-}
-
-static void magnet_apply_pwm(void)
-{
-  uint32_t compare = ((__HAL_TIM_GET_AUTORELOAD(&htim4) + 1U) * (uint32_t)magnet.pwm_percent) / 100U;
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, compare);
-}
-
-static void magnet_set_pwm(uint8_t pwm_percent)
-{
-  if (pwm_percent > 100U)
-  {
-    pwm_percent = 100U;
-  }
-  magnet.pwm_percent = pwm_percent;
-  magnet_apply_pwm();
-}
-
-static void emit_magnet_state(void)
-{
-  printf("magnet pwm %u\r\n", (unsigned)magnet.pwm_percent);
-}
-
-static FanPowerRelayState *find_fan_power_relay(const char *key)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(fan_power_relays) / sizeof(fan_power_relays[0]); i++)
-  {
-    if (strcmp(fan_power_relays[i].key, key) == 0)
-    {
-      return &fan_power_relays[i];
-    }
-  }
-  return NULL;
-}
-
-static void apply_fan_power_relay(FanPowerRelayState *relay)
-{
-  GPIO_PinState level = relay->on
-                        ? (relay->active_high ? GPIO_PIN_SET : GPIO_PIN_RESET)
-                        : (relay->active_high ? GPIO_PIN_RESET : GPIO_PIN_SET);
-  HAL_GPIO_WritePin(relay->port, relay->pin, level);
-}
-
-static void emit_all_fan_power_relays(void)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(fan_power_relays) / sizeof(fan_power_relays[0]); i++)
-  {
-    printf("fanpwr %s %s active_%s\r\n",
-           fan_power_relays[i].key,
-           fan_power_relays[i].on ? "on" : "off",
-           fan_power_relays[i].active_high ? "high" : "low");
-  }
-}
-
-static void tick_intel_fans(void)
-{
-  uint32_t now_ms = HAL_GetTick();
-  size_t i;
-
-  for (i = 0U; i < sizeof(intel_fans) / sizeof(intel_fans[0]); i++)
-  {
-    IntelFanState *fan = &intel_fans[i];
-    uint8_t level = HAL_GPIO_ReadPin(fan->tach_port, fan->tach_pin) == GPIO_PIN_SET ? 1U : 0U;
-    if (level && !fan->tach_last_level)
-    {
-      fan->tach_edges_total++;
-    }
-    fan->tach_last_level = level;
-  }
-
-  if (intel_fan_sample_tick_ms == 0U)
-  {
-    intel_fan_sample_tick_ms = now_ms;
-    return;
-  }
-
-  if ((now_ms - intel_fan_sample_tick_ms) < 1000U)
-  {
-    return;
-  }
-
-  for (i = 0U; i < sizeof(intel_fans) / sizeof(intel_fans[0]); i++)
-  {
-    IntelFanState *fan = &intel_fans[i];
-    uint32_t delta_edges = fan->tach_edges_total - fan->tach_edges_sample;
-    uint32_t elapsed_ms = now_ms - intel_fan_sample_tick_ms;
-
-    fan->tach_edges_sample = fan->tach_edges_total;
-    fan->rpm = (elapsed_ms == 0U) ? 0U : ((delta_edges * 60000U) / (2U * elapsed_ms));
-  }
-
-  intel_fan_sample_tick_ms = now_ms;
 }
 
 static ByjStepperState *find_byj_stepper(const char *key)
@@ -623,14 +394,18 @@ static void emit_byj_stepper_state(const ByjStepperState *stepper)
   if (strcmp(stepper->key, "byj1") == 0)
   {
     Byj1MotionSnapshot snapshot;
+    int32_t mm_x1000;
     byj1_motion_get_snapshot(&snapshot);
-    printf("byj byj1 enabled %s moving %s pos %ld target %ld vel %ld endstop %s\r\n",
+    mm_x1000 = byj1_mm_x1000_from_steps(snapshot.position);
+    printf("byj byj1 enabled %s moving %s pos %ld target %ld vel %ld endstop %s mm %ld.%03ld\r\n",
            snapshot.enabled ? "on" : "off",
            snapshot.moving ? "on" : "off",
            (long)snapshot.position,
            (long)snapshot.target,
            (long)snapshot.velocity,
-           byj1_motion_endstop_triggered() ? "trig" : "clear");
+           byj1_motion_endstop_triggered() ? "trig" : "clear",
+           (long)(mm_x1000 / 1000),
+           (long)labs(mm_x1000 % 1000));
     return;
   }
   if (strcmp(stepper->key, "byj2") == 0)
@@ -837,197 +612,6 @@ static void tick_byj_steppers(void)
   }
 }
 
-static HAL_StatusTypeDef oled_write_command(uint8_t cmd)
-{
-  uint8_t packet[2] = {0x00U, cmd};
-  return HAL_I2C_Master_Transmit(&hi2c1, OLED_I2C_ADDR, packet, sizeof(packet), 50U);
-}
-
-static HAL_StatusTypeDef oled_write_data(const uint8_t *data, uint16_t len)
-{
-  uint8_t packet[17];
-  uint16_t offset = 0U;
-
-  packet[0] = 0x40U;
-  while (offset < len)
-  {
-    uint16_t chunk = (uint16_t)((len - offset) > 16U ? 16U : (len - offset));
-    memcpy(&packet[1], &data[offset], chunk);
-    if (HAL_I2C_Master_Transmit(&hi2c1, OLED_I2C_ADDR, packet, (uint16_t)(chunk + 1U), 50U) != HAL_OK)
-    {
-      return HAL_ERROR;
-    }
-    offset += chunk;
-  }
-  return HAL_OK;
-}
-
-static void oled_clear_buffer(void)
-{
-  memset(oled_buffer, 0, sizeof(oled_buffer));
-}
-
-static const uint8_t *oled_glyph_for_char(char c)
-{
-  static const uint8_t blank[5] = {0, 0, 0, 0, 0};
-  static const uint8_t dash[5]  = {0x08, 0x08, 0x08, 0x08, 0x08};
-  static const uint8_t slash[5] = {0x20, 0x10, 0x08, 0x04, 0x02};
-  static const uint8_t pct[5]   = {0x62, 0x64, 0x08, 0x13, 0x23};
-  static const uint8_t num0[5]  = {0x3E, 0x51, 0x49, 0x45, 0x3E};
-  static const uint8_t num1[5]  = {0x00, 0x42, 0x7F, 0x40, 0x00};
-  static const uint8_t num2[5]  = {0x42, 0x61, 0x51, 0x49, 0x46};
-  static const uint8_t num3[5]  = {0x21, 0x41, 0x45, 0x4B, 0x31};
-  static const uint8_t num4[5]  = {0x18, 0x14, 0x12, 0x7F, 0x10};
-  static const uint8_t num5[5]  = {0x27, 0x45, 0x45, 0x45, 0x39};
-  static const uint8_t num6[5]  = {0x3C, 0x4A, 0x49, 0x49, 0x30};
-  static const uint8_t num7[5]  = {0x01, 0x71, 0x09, 0x05, 0x03};
-  static const uint8_t num8[5]  = {0x36, 0x49, 0x49, 0x49, 0x36};
-  static const uint8_t num9[5]  = {0x06, 0x49, 0x49, 0x29, 0x1E};
-  static const uint8_t chA[5]   = {0x7E, 0x11, 0x11, 0x11, 0x7E};
-  static const uint8_t chB[5]   = {0x7F, 0x49, 0x49, 0x49, 0x36};
-  static const uint8_t chF[5]   = {0x7F, 0x09, 0x09, 0x09, 0x01};
-  static const uint8_t chL[5]   = {0x7F, 0x40, 0x40, 0x40, 0x40};
-  static const uint8_t chP[5]   = {0x7F, 0x09, 0x09, 0x09, 0x06};
-  static const uint8_t chS[5]   = {0x46, 0x49, 0x49, 0x49, 0x31};
-
-  switch (c)
-  {
-    case ' ': return blank;
-    case '-': return dash;
-    case '/': return slash;
-    case '%': return pct;
-    case '0': return num0;
-    case '1': return num1;
-    case '2': return num2;
-    case '3': return num3;
-    case '4': return num4;
-    case '5': return num5;
-    case '6': return num6;
-    case '7': return num7;
-    case '8': return num8;
-    case '9': return num9;
-    case 'A': return chA;
-    case 'B': return chB;
-    case 'F': return chF;
-    case 'L': return chL;
-    case 'P': return chP;
-    case 'S': return chS;
-    default:  return blank;
-  }
-}
-
-static void oled_draw_char(uint8_t x, uint8_t page, char c)
-{
-  const uint8_t *glyph;
-  uint16_t base;
-  uint8_t i;
-
-  if (page >= OLED_PAGE_COUNT || x > (OLED_WIDTH - 6U))
-  {
-    return;
-  }
-
-  glyph = oled_glyph_for_char(c);
-  base = (uint16_t)page * OLED_WIDTH + x;
-  for (i = 0U; i < 5U; i++)
-  {
-    oled_buffer[base + i] = glyph[i];
-  }
-  oled_buffer[base + 5U] = 0x00U;
-}
-
-static void oled_draw_text(uint8_t x, uint8_t page, const char *text)
-{
-  while (*text != '\0' && x <= (OLED_WIDTH - 6U))
-  {
-    oled_draw_char(x, page, *text++);
-    x = (uint8_t)(x + 6U);
-  }
-}
-
-static void oled_flush(void)
-{
-  uint8_t page;
-
-  for (page = 0U; page < OLED_PAGE_COUNT; page++)
-  {
-    uint8_t col = OLED_COLUMN_OFFSET;
-    if (oled_write_command((uint8_t)(0xB0U + page)) != HAL_OK ||
-        oled_write_command((uint8_t)(0x00U + (col & 0x0FU))) != HAL_OK ||
-        oled_write_command((uint8_t)(0x10U + ((col >> 4) & 0x0FU))) != HAL_OK ||
-        oled_write_data(&oled_buffer[page * OLED_WIDTH], OLED_WIDTH) != HAL_OK)
-    {
-      oled_ready = 0U;
-      return;
-    }
-  }
-}
-
-static void oled_init_display(void)
-{
-  static const uint8_t init_cmds[] = {
-    0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40,
-    0xA1, 0xC8, 0xDA, 0x12, 0x81, 0x7F, 0xD9, 0x22,
-    0xDB, 0x20, 0xA4, 0xA6, 0xAF
-  };
-  size_t i;
-
-  HAL_Delay(50U);
-  for (i = 0U; i < sizeof(init_cmds) / sizeof(init_cmds[0]); i++)
-  {
-    if (oled_write_command(init_cmds[i]) != HAL_OK)
-    {
-      oled_ready = 0U;
-      return;
-    }
-  }
-
-  oled_ready = 1U;
-  oled_clear_buffer();
-  oled_flush();
-}
-
-static void tick_oled(void)
-{
-  char line[24];
-  uint32_t now_ms = HAL_GetTick();
-
-  if (!oled_ready || (now_ms - oled_last_refresh_ms) < 200U)
-  {
-    return;
-  }
-
-  oled_last_refresh_ms = now_ms;
-  oled_clear_buffer();
-
-  snprintf(line, sizeof(line), "A %ld", (long)axes[0].position);
-  oled_draw_text(0U, 0U, line);
-
-  snprintf(line, sizeof(line), "B %ld", (long)axes[1].position);
-  oled_draw_text(0U, 1U, line);
-
-  snprintf(line, sizeof(line), "F1 %u%% %lu", (unsigned)intel_fans[0].pwm_percent, (unsigned long)intel_fans[0].rpm);
-  oled_draw_text(0U, 2U, line);
-
-  snprintf(line, sizeof(line), "F2 %u%% %lu", (unsigned)intel_fans[1].pwm_percent, (unsigned long)intel_fans[1].rpm);
-  oled_draw_text(0U, 3U, line);
-
-  snprintf(line, sizeof(line), "S1 %u S2 %u",
-           (unsigned)servo_us_to_angle(servos[0].pulse_us),
-           (unsigned)servo_us_to_angle(servos[1].pulse_us));
-  oled_draw_text(0U, 4U, line);
-
-  snprintf(line, sizeof(line), "P1 %u P2 %u",
-           (unsigned)servo_us_to_angle(servos[2].pulse_us),
-           (unsigned)servo_us_to_angle(servos[3].pulse_us));
-  oled_draw_text(0U, 5U, line);
-
-  snprintf(line, sizeof(line), "L %u", (unsigned)servo_us_to_angle(servos[4].pulse_us));
-  oled_draw_text(0U, 6U, line);
-
-  oled_flush();
-}
-
 static uint8_t axis_min_endstop_triggered(const AxisState *axis)
 {
   return HAL_GPIO_ReadPin(axis->min_endstop_port, axis->min_endstop_pin) == GPIO_PIN_SET ? 1U : 0U;
@@ -1080,8 +664,53 @@ static const char *b_snapshot_homing_state_name(const BAxisMotionSnapshot *snaps
   }
 }
 
+static const char *a_snapshot_homing_state_name(const AAxisMotionSnapshot *snapshot)
+{
+  switch (snapshot->homing_state)
+  {
+    case 1U:
+      return "seek_min";
+    case 2U:
+      return "release_min";
+    case 3U:
+      return "scan_seek_min";
+    case 4U:
+      return "scan_release_min";
+    case 5U:
+      return "scan_seek_max";
+    case 6U:
+      return "scan_release_max";
+    default:
+      return "idle";
+  }
+}
+
 static void emit_axis_state(const AxisState *axis)
 {
+  if (strcmp(axis->key, "a") == 0)
+  {
+    AAxisMotionSnapshot snapshot;
+    a_axis_motion_get_snapshot(&snapshot);
+    printf(
+      "axis %s enabled %s moving %s pos %ld target %ld vel %ld homed %s homing %s endstop_min %s endstop_max %s raw_pa9 %u raw_pc0 %u travel %lu decel_window %lu\r\n",
+      axis->key,
+      snapshot.enabled ? "on" : "off",
+      snapshot.moving ? "on" : "off",
+      (long)snapshot.position,
+      (long)snapshot.target,
+      (long)snapshot.velocity,
+      snapshot.homed ? "yes" : "no",
+      a_snapshot_homing_state_name(&snapshot),
+      a_axis_motion_min_endstop_triggered() ? "trig" : "clear",
+      a_axis_motion_max_endstop_triggered() ? "trig" : "clear",
+      (unsigned)HAL_GPIO_ReadPin(A_MIN_ENDSTOP_GPIO_Port, A_MIN_ENDSTOP_Pin),
+      (unsigned)HAL_GPIO_ReadPin(A_MAX_ENDSTOP_GPIO_Port, A_MAX_ENDSTOP_Pin),
+      (unsigned long)snapshot.travel_steps,
+      (unsigned long)snapshot.decel_window_steps
+    );
+    return;
+  }
+
   if (axis == b_axis_state())
   {
     BAxisMotionSnapshot snapshot;
@@ -1145,7 +774,7 @@ static void emit_dirty_axis_states(void)
 
 static void emit_tmc_status(void)
 {
-  printf("tmc uart usart3 tx PB10 rx PB11 ab_en active_low endstops a_min PA9 a_max PA10 b_min PB4 b_max PB5 nc_pullup addr_a %u addr_b %u\r\n",
+  printf("tmc uart tx PB10 rx PB11 ab_en active_low endstops a_min PA9 a_max PC0 b_min PB4 b_max PB5 addr_a %u addr_b %u\r\n",
          (unsigned)axes[0].driver_addr,
          (unsigned)axes[1].driver_addr);
 }
@@ -1187,55 +816,6 @@ static uint32_t axis_effective_travel_steps(const AxisState *axis)
     return B_TUNED_TRAVEL_STEPS;
   }
   return 0U;
-}
-
-static uint32_t axis_target_interval_us(const AxisState *axis)
-{
-  uint32_t travel_steps;
-  uint32_t distance_to_edge;
-  uint32_t decel_window_steps;
-  uint32_t ramp_span;
-
-  travel_steps = axis_effective_travel_steps(axis);
-  if (travel_steps == 0U)
-  {
-    return axis->cruise_interval_us;
-  }
-
-  if (strcmp(axis->key, "b") == 0)
-  {
-    decel_window_steps = axis->decel_window_steps;
-  }
-  else
-  {
-    return axis->cruise_interval_us;
-  }
-
-  if (decel_window_steps == 0U || axis->start_interval_us <= axis->cruise_interval_us)
-  {
-    return axis->cruise_interval_us;
-  }
-
-  if (axis->velocity > 0)
-  {
-    distance_to_edge = ((uint32_t)axis->position >= travel_steps) ? 0U : (travel_steps - (uint32_t)axis->position);
-  }
-  else if (axis->velocity < 0)
-  {
-    distance_to_edge = (axis->position <= 0) ? 0U : (uint32_t)axis->position;
-  }
-  else
-  {
-    return axis->start_interval_us;
-  }
-
-  if (distance_to_edge >= decel_window_steps)
-  {
-    return axis->cruise_interval_us;
-  }
-
-  ramp_span = axis->start_interval_us - axis->cruise_interval_us;
-  return axis->cruise_interval_us + (uint32_t)(((uint64_t)ramp_span * (uint64_t)(decel_window_steps - distance_to_edge)) / (uint64_t)decel_window_steps);
 }
 
 static uint32_t step_tick_now(void)
@@ -1291,15 +871,6 @@ static void axis_stop_motion(AxisState *axis)
   HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_RESET);
 }
 
-static void step_pulse_delay(uint32_t cycles)
-{
-  volatile uint32_t i;
-  for (i = 0U; i < cycles; i++)
-  {
-    __NOP();
-  }
-}
-
 static void step_delay_us(uint16_t us)
 {
   uint32_t start = step_tick_now();
@@ -1307,302 +878,6 @@ static void step_delay_us(uint16_t us)
   while ((uint32_t)(step_tick_now() - start) < ticks)
   {
   }
-}
-
-static void pulse_axis_step(AxisState *axis, int32_t direction)
-{
-  HAL_GPIO_WritePin(axis->dir_port, axis->dir_pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  axis->dir_setup_ticks = 1U;
-  axis->step_high_ticks = 0U;
-}
-
-static void b_motion_start(int32_t direction, uint32_t steps, uint32_t interval_us, uint8_t stop_on_endstop)
-{
-  if (interval_us < 10U)
-  {
-    interval_us = 10U;
-  }
-
-  b_motion.direction = direction;
-  b_motion.steps_remaining = steps;
-  b_motion.moved_steps = 0U;
-  b_motion.interval_us = interval_us;
-  b_motion.current_interval_us = interval_us;
-  b_motion.stop_on_endstop = stop_on_endstop;
-  b_motion.continuous = 0U;
-  b_motion.pulse_high_phase = 0U;
-  b_motion.active = (steps > 0U) ? 1U : 0U;
-
-  if (b_motion.active != 0U)
-  {
-    HAL_TIM_Base_Stop_IT(&htim6);
-    HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    __HAL_TIM_SET_AUTORELOAD(&htim6, ((b_motion.current_interval_us > 5U) ? (b_motion.current_interval_us - 5U) : 10U) - 1U);
-    __HAL_TIM_SET_COUNTER(&htim6, 0U);
-    HAL_TIM_Base_Start_IT(&htim6);
-  }
-}
-
-static void b_motion_start_continuous(int32_t direction, uint32_t interval_us)
-{
-  if (interval_us < 10U)
-  {
-    interval_us = 10U;
-  }
-
-  b_motion.direction = direction;
-  b_motion.steps_remaining = 0U;
-  b_motion.moved_steps = 0U;
-  b_motion.interval_us = interval_us;
-  b_motion.current_interval_us = interval_us;
-  b_motion.stop_on_endstop = 1U;
-  b_motion.continuous = 1U;
-  b_motion.pulse_high_phase = 0U;
-  b_motion.active = 1U;
-
-  HAL_TIM_Base_Stop_IT(&htim6);
-  HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  __HAL_TIM_SET_AUTORELOAD(&htim6, ((b_motion.current_interval_us > 5U) ? (b_motion.current_interval_us - 5U) : 10U) - 1U);
-  __HAL_TIM_SET_COUNTER(&htim6, 0U);
-  HAL_TIM_Base_Start_IT(&htim6);
-}
-
-static void b_motion_stop(void)
-{
-  HAL_TIM_Base_Stop_IT(&htim6);
-  b_motion.active = 0U;
-  b_motion.continuous = 0U;
-  b_motion.pulse_high_phase = 0U;
-  b_motion.steps_remaining = 0U;
-  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
-  __HAL_TIM_SET_AUTORELOAD(&htim6, 5U - 1U);
-  __HAL_TIM_SET_COUNTER(&htim6, 0U);
-  HAL_TIM_Base_Start_IT(&htim6);
-}
-
-static void b_motion_wait(void)
-{
-  while (b_motion.active != 0U)
-  {
-  }
-}
-
-static uint32_t b_run_steps(int32_t direction, uint32_t steps, uint16_t interval_us, uint8_t stop_on_endstop)
-{
-  b_motion_start(direction, steps, interval_us, stop_on_endstop);
-  b_motion_wait();
-  return b_motion.moved_steps;
-}
-
-static uint32_t b_target_interval_for_position(void)
-{
-  AxisState *axis = b_axis_state();
-  uint32_t distance_to_edge;
-  uint32_t ramp_span = (axis->start_interval_us > b_motion.interval_us) ? (axis->start_interval_us - b_motion.interval_us) : 0U;
-
-  if (b_motion.direction > 0)
-  {
-    distance_to_edge = ((uint32_t)axis->position >= axis_effective_travel_steps(axis)) ? 0U : (axis_effective_travel_steps(axis) - (uint32_t)axis->position);
-  }
-  else
-  {
-    distance_to_edge = (axis->position <= 0) ? 0U : (uint32_t)axis->position;
-  }
-
-  if (distance_to_edge >= axis->decel_window_steps || ramp_span == 0U)
-  {
-    return b_motion.interval_us;
-  }
-
-  return b_motion.interval_us + (uint32_t)(((uint64_t)ramp_span * (uint64_t)(axis->decel_window_steps - distance_to_edge)) / (uint64_t)axis->decel_window_steps);
-}
-
-static void b_home_blocking(void)
-{
-  AxisState *axis = b_axis_state();
-  uint32_t seek_steps = 0U;
-  uint32_t release_steps = 0U;
-
-  if (!axis->enabled)
-  {
-    uart_write_line("err axis disabled");
-    return;
-  }
-
-  axis->homed = 0U;
-  axis->homing_state = 1U;
-  axis->moving = 1U;
-  axis->velocity = -1;
-  axis->target = INT32_MIN;
-  printf("ok axis %s home\r\n", axis->key);
-  emit_axis_state(axis);
-
-  while (!axis_min_endstop_triggered(axis) && seek_steps < 50000U)
-  {
-    uint32_t moved = b_run_steps(-1, 200U, axis->homing_interval_us, 1U);
-    seek_steps += moved;
-    axis->homing_state = 1U;
-    axis->moving = 1U;
-    axis->velocity = -1;
-    axis->target = INT32_MIN;
-    if (moved == 0U)
-    {
-      break;
-    }
-  }
-
-  if (!axis_min_endstop_triggered(axis))
-  {
-    uart_write_line("err axis b home seek timeout");
-    axis_stop_motion(axis);
-    emit_axis_state(axis);
-    return;
-  }
-
-  axis->homing_state = 2U;
-  while (axis_min_endstop_triggered(axis) && release_steps < 8000U)
-  {
-    release_steps += b_run_steps(1, 100U, 1000U, 0U);
-    axis->homing_state = 2U;
-    axis->moving = 1U;
-    axis->velocity = 1;
-    axis->target = INT32_MAX;
-  }
-
-  if (axis_min_endstop_triggered(axis))
-  {
-    uart_write_line("err axis b home release timeout");
-    axis_stop_motion(axis);
-    emit_axis_state(axis);
-    return;
-  }
-
-  axis->position = 0;
-  axis->homed = 1U;
-  axis_stop_motion(axis);
-  printf("ok axis %s homed release_steps %lu\r\n", axis->key, (unsigned long)release_steps);
-  emit_axis_state(axis);
-}
-
-static void b_scan_blocking(void)
-{
-  AxisState *axis = b_axis_state();
-  uint32_t travel_steps = 0U;
-
-  b_home_blocking();
-  if (!axis->homed)
-  {
-    return;
-  }
-
-  axis->homing_state = 5U;
-  axis->moving = 1U;
-  axis->velocity = 1;
-  axis->target = INT32_MAX;
-  while (!axis_max_endstop_triggered(axis) && travel_steps < 60000U)
-  {
-    uint32_t moved = b_run_steps(1, 200U, axis->cruise_interval_us, 1U);
-    travel_steps += moved;
-    axis->homing_state = 5U;
-    axis->moving = 1U;
-    axis->velocity = 1;
-    axis->target = INT32_MAX;
-    if (moved == 0U)
-    {
-      break;
-    }
-  }
-
-  if (!axis_max_endstop_triggered(axis))
-  {
-    uart_write_line("err axis b scan seek_max timeout");
-    axis_stop_motion(axis);
-    emit_axis_state(axis);
-    return;
-  }
-
-  axis->scan_travel_steps = axis->position;
-  axis->tuned_travel_steps = (axis->position > 0) ? (uint32_t)axis->position : axis->tuned_travel_steps;
-  axis_stop_motion(axis);
-  printf("ok axis %s scan travel_steps %ld\r\n", axis->key, (long)axis->scan_travel_steps);
-  emit_axis_state(axis);
-}
-
-static void tick_b_motion_isr(void)
-{
-  AxisState *axis = b_axis_state();
-  uint32_t target_interval;
-
-  if (!b_motion.active || !axis->enabled)
-  {
-    b_motion_stop();
-    axis_stop_motion(axis);
-    return;
-  }
-
-  if (b_motion.pulse_high_phase == 0U)
-  {
-    if (b_motion.stop_on_endstop != 0U)
-    {
-      if (b_motion.direction < 0 && axis_min_endstop_triggered(axis))
-      {
-        b_motion_stop();
-        axis_stop_motion(axis);
-        axis->state_dirty = 1U;
-        return;
-      }
-      if (b_motion.direction > 0 && axis_max_endstop_triggered(axis))
-      {
-        b_motion_stop();
-        axis_stop_motion(axis);
-        axis->state_dirty = 1U;
-        return;
-      }
-    }
-
-    HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (b_motion.direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_SET);
-    b_motion.pulse_high_phase = 1U;
-    __HAL_TIM_SET_AUTORELOAD(&htim6, 5U - 1U);
-    __HAL_TIM_SET_COUNTER(&htim6, 0U);
-    return;
-  }
-
-  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
-  b_motion.pulse_high_phase = 0U;
-  axis->position += b_motion.direction;
-  b_motion.moved_steps++;
-
-  if (b_motion.continuous != 0U)
-  {
-    target_interval = b_target_interval_for_position();
-    if (b_motion.current_interval_us > target_interval)
-    {
-      uint32_t delta = b_motion.current_interval_us - target_interval;
-      uint32_t next_interval = b_motion.current_interval_us - ((delta > axis->accel_interval_delta_us) ? axis->accel_interval_delta_us : delta);
-      b_motion.current_interval_us = next_interval;
-    }
-    else if (b_motion.current_interval_us < target_interval)
-    {
-      uint32_t next_interval = b_motion.current_interval_us + axis->accel_interval_delta_us;
-      b_motion.current_interval_us = (next_interval > target_interval) ? target_interval : next_interval;
-    }
-  }
-
-  if (b_motion.continuous == 0U && b_motion.steps_remaining > 0U)
-  {
-    b_motion.steps_remaining--;
-    if (b_motion.steps_remaining == 0U)
-    {
-      b_motion_stop();
-      axis_stop_motion(axis);
-      axis->state_dirty = 1U;
-      return;
-    }
-  }
-
-  __HAL_TIM_SET_AUTORELOAD(&htim6, ((b_motion.current_interval_us > 5U) ? (b_motion.current_interval_us - 5U) : 10U) - 1U);
-  __HAL_TIM_SET_COUNTER(&htim6, 0U);
 }
 
 static uint8_t tmc_crc8(const uint8_t *bytes, uint8_t len)
@@ -1795,7 +1070,6 @@ static void tmc_uart_boot_probe(void)
 {
   axes[0].enabled = 1U;
   apply_axis_enable_state();
-  printf("boot axis a enabled\r\n");
   HAL_Delay(10U);
   tmc_emit_driver_probe(axes[0].driver_addr);
   tmc_set_driver_stealth(&axes[0], 0U);
@@ -1808,6 +1082,26 @@ static void tmc_uart_boot_probe(void)
   tmc_set_driver_current(&axes[1], 1000U);
   tmc_emit_driver_status(&axes[1]);
   tmc_uart_dump_raw(40U);
+}
+
+static void host_uart_clear_errors(void)
+{
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE) != RESET)
+  {
+    __HAL_UART_CLEAR_OREFLAG(&huart1);
+  }
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_NE) != RESET)
+  {
+    __HAL_UART_CLEAR_NEFLAG(&huart1);
+  }
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_FE) != RESET)
+  {
+    __HAL_UART_CLEAR_FEFLAG(&huart1);
+  }
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_PE) != RESET)
+  {
+    __HAL_UART_CLEAR_PEFLAG(&huart1);
+  }
 }
 
 static HAL_StatusTypeDef tmc_uart_read_reg(uint8_t driver_addr, uint8_t reg_addr, uint32_t *value_out)
@@ -2207,52 +1501,6 @@ static void tmc_set_driver_stealth(AxisState *axis, uint8_t enable)
          (unsigned long)gconf_after);
 }
 
-static void tick_servos(void)
-{
-  uint32_t now_tick = step_tick_now();
-  uint32_t cycles_per_us = HAL_RCC_GetHCLKFreq() / 1000000U;
-  uint32_t elapsed_us;
-  size_t i;
-
-  if (cycles_per_us == 0U)
-  {
-    return;
-  }
-
-  if (servo_frame_started == 0U)
-  {
-    servo_frame_started = 1U;
-    servo_frame_start_tick = now_tick;
-    for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-    {
-      HAL_GPIO_WritePin(servos[i].port, servos[i].pin, GPIO_PIN_SET);
-      servos[i].frame_active = 1U;
-    }
-    return;
-  }
-
-  elapsed_us = (now_tick - servo_frame_start_tick) / cycles_per_us;
-
-  for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-  {
-    if (servos[i].frame_active && elapsed_us >= servos[i].pulse_us)
-    {
-      HAL_GPIO_WritePin(servos[i].port, servos[i].pin, GPIO_PIN_RESET);
-      servos[i].frame_active = 0U;
-    }
-  }
-
-  if (elapsed_us >= 20000U)
-  {
-    servo_frame_start_tick = now_tick;
-    for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-    {
-      HAL_GPIO_WritePin(servos[i].port, servos[i].pin, GPIO_PIN_SET);
-      servos[i].frame_active = 1U;
-    }
-  }
-}
-
 static void process_command_line(char *line)
 {
   char *tokens[10] = {0};
@@ -2275,10 +1523,96 @@ static void process_command_line(char *line)
     emit_all_axis_states();
     emit_all_byj_stepper_states();
     emit_tmc_status();
-    emit_all_servo_states();
-    emit_all_fan_states();
-    emit_all_fan_power_relays();
-    emit_magnet_state();
+    servo_emit_all_states();
+    fan_emit_all_states();
+    fan_power_relay_emit_all_states();
+    magnet_emit_state();
+    return;
+  }
+
+  if (strcmp(tokens[0], "ab") == 0)
+  {
+    AAxisMotionSnapshot a_snapshot;
+    BAxisMotionSnapshot b_snapshot;
+    int32_t a_target;
+    int32_t b_target;
+
+    if (token_count < 2U)
+    {
+      uart_write_line("err invalid ab command");
+      return;
+    }
+
+    if (strcmp(tokens[1], "status") == 0)
+    {
+      coord_motion_emit_state();
+      return;
+    }
+
+    if (strcmp(tokens[1], "stop") == 0)
+    {
+      a_axis_motion_get_snapshot(&a_snapshot);
+      b_axis_motion_get_snapshot(&b_snapshot);
+      coord_motion_stop();
+      a_axis_motion_stop();
+      b_axis_motion_stop();
+      a_axis_motion_set_position(a_snapshot.position, 0U);
+      b_axis_motion_set_position(b_snapshot.position, 0U);
+      uart_write_line("ok ab stop");
+      coord_motion_emit_state();
+      emit_axis_state(&axes[0]);
+      emit_axis_state(&axes[1]);
+      return;
+    }
+
+    if (token_count < 4U)
+    {
+      uart_write_line("err invalid ab command");
+      return;
+    }
+
+    a_axis_motion_get_snapshot(&a_snapshot);
+    b_axis_motion_get_snapshot(&b_snapshot);
+
+    axes[0].enabled = 1U;
+    axes[1].enabled = 1U;
+    apply_axis_enable_state();
+    a_axis_motion_set_enabled(1U);
+    b_axis_motion_set_enabled(1U);
+
+    a_axis_motion_stop();
+    b_axis_motion_stop();
+    coord_motion_stop();
+
+    if (strcmp(tokens[1], "goto") == 0)
+    {
+      a_target = (int32_t)strtol(tokens[2], NULL, 10);
+      b_target = (int32_t)strtol(tokens[3], NULL, 10);
+      if (coord_motion_start(a_target, b_target) == 0U)
+      {
+        return;
+      }
+      printf("ok ab goto %ld %ld\r\n", (long)a_target, (long)b_target);
+      coord_motion_emit_state();
+      return;
+    }
+
+    if (strcmp(tokens[1], "move") == 0)
+    {
+      a_target = a_snapshot.position + (int32_t)strtol(tokens[2], NULL, 10);
+      b_target = b_snapshot.position + (int32_t)strtol(tokens[3], NULL, 10);
+      if (coord_motion_start(a_target, b_target) == 0U)
+      {
+        return;
+      }
+      printf("ok ab move %ld %ld\r\n",
+             (long)(a_target - a_snapshot.position),
+             (long)(b_target - b_snapshot.position));
+      coord_motion_emit_state();
+      return;
+    }
+
+    uart_write_line("err unsupported ab command");
     return;
   }
 
@@ -2313,45 +1647,45 @@ static void process_command_line(char *line)
         }
         if (strcmp(tokens[3], "on") == 0)
         {
-          if (strcmp(stepper->key, "byj1") == 0)
-          {
-            byj1_motion_set_enabled(1U);
-            printf("ok byj %s enable on\r\n", stepper->key);
-            emit_byj_stepper_state(stepper);
-            return;
-          }
-          if (strcmp(stepper->key, "byj2") == 0)
-          {
-            byj2_motion_set_enabled(1U);
-            printf("ok byj %s enable on\r\n", stepper->key);
-            emit_byj_stepper_state(stepper);
-            return;
-          }
-          stepper->enabled = 1U;
-          apply_byj_stepper_enable(stepper);
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          byj1_motion_set_enabled(1U);
           printf("ok byj %s enable on\r\n", stepper->key);
+          emit_byj_stepper_state(stepper);
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          byj2_motion_set_enabled(1U);
+          printf("ok byj %s enable on\r\n", stepper->key);
+          emit_byj_stepper_state(stepper);
+          return;
+        }
+        stepper->enabled = 1U;
+        apply_byj_stepper_enable(stepper);
+        printf("ok byj %s enable on\r\n", stepper->key);
           emit_byj_stepper_state(stepper);
           return;
         }
         if (strcmp(tokens[3], "off") == 0)
         {
-          if (strcmp(stepper->key, "byj1") == 0)
-          {
-            byj1_motion_set_enabled(0U);
-            printf("ok byj %s enable off\r\n", stepper->key);
-            emit_byj_stepper_state(stepper);
-            return;
-          }
-          if (strcmp(stepper->key, "byj2") == 0)
-          {
-            byj2_motion_set_enabled(0U);
-            printf("ok byj %s enable off\r\n", stepper->key);
-            emit_byj_stepper_state(stepper);
-            return;
-          }
-          stepper->enabled = 0U;
-          stepper->moving = 0U;
-          stepper->velocity = 0;
+        if (strcmp(stepper->key, "byj1") == 0)
+        {
+          byj1_motion_set_enabled(0U);
+          printf("ok byj %s enable off\r\n", stepper->key);
+          emit_byj_stepper_state(stepper);
+          return;
+        }
+        if (strcmp(stepper->key, "byj2") == 0)
+        {
+          byj2_motion_set_enabled(0U);
+          printf("ok byj %s enable off\r\n", stepper->key);
+          emit_byj_stepper_state(stepper);
+          return;
+        }
+        stepper->enabled = 0U;
+        stepper->moving = 0U;
+        stepper->velocity = 0;
           stepper->target = stepper->position;
           stepper->next_step_tick = 0U;
           apply_byj_stepper_enable(stepper);
@@ -2547,7 +1881,7 @@ static void process_command_line(char *line)
   {
     if (token_count >= 2U && strcmp(tokens[1], "status") == 0)
     {
-      emit_magnet_state();
+      magnet_emit_state();
       return;
     }
     if (token_count >= 3U && strcmp(tokens[1], "pwm") == 0)
@@ -2563,7 +1897,7 @@ static void process_command_line(char *line)
       }
       magnet_set_pwm((uint8_t)pwm);
       printf("ok magnet pwm %ld\r\n", pwm);
-      emit_magnet_state();
+      magnet_emit_state();
       return;
     }
     uart_write_line("err invalid magnet command");
@@ -2574,7 +1908,7 @@ static void process_command_line(char *line)
   {
     if (token_count >= 2U && strcmp(tokens[1], "status") == 0)
     {
-      emit_all_fan_power_relays();
+      fan_power_relay_emit_all_states();
       return;
     }
     if (token_count < 3U)
@@ -2583,7 +1917,7 @@ static void process_command_line(char *line)
       return;
     }
     {
-      FanPowerRelayState *relay = find_fan_power_relay(tokens[1]);
+      FanPowerRelayState *relay = fan_power_relay_find(tokens[1]);
       if (relay == NULL)
       {
         uart_write_line("err unknown fan relay");
@@ -2592,17 +1926,17 @@ static void process_command_line(char *line)
       if (strcmp(tokens[2], "on") == 0)
       {
         relay->on = 1U;
-        apply_fan_power_relay(relay);
+        fan_power_relay_apply(relay);
         printf("ok fanpwr %s on\r\n", relay->key);
-        emit_all_fan_power_relays();
+        fan_power_relay_emit_all_states();
         return;
       }
       if (strcmp(tokens[2], "off") == 0)
       {
         relay->on = 0U;
-        apply_fan_power_relay(relay);
+        fan_power_relay_apply(relay);
         printf("ok fanpwr %s off\r\n", relay->key);
-        emit_all_fan_power_relays();
+        fan_power_relay_emit_all_states();
         return;
       }
     }
@@ -2614,7 +1948,7 @@ static void process_command_line(char *line)
   {
     if (token_count >= 2U && strcmp(tokens[1], "status") == 0)
     {
-      emit_all_fan_states();
+      fan_emit_all_states();
       return;
     }
 
@@ -2632,24 +1966,20 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[1], "all") == 0)
     {
-      size_t i;
       uint32_t pwm = strtoul(tokens[3], NULL, 10);
       if (pwm > 100U)
       {
         uart_write_line("err invalid fan pwm");
         return;
       }
-      for (i = 0U; i < sizeof(intel_fans) / sizeof(intel_fans[0]); i++)
-      {
-        intel_fan_set_pwm(&intel_fans[i], (uint8_t)pwm);
-      }
+      fan_set_all_pwm((uint8_t)pwm);
       printf("ok fan all pwm %lu\r\n", (unsigned long)pwm);
-      emit_all_fan_states();
+      fan_emit_all_states();
       return;
     }
 
     {
-      IntelFanState *fan = find_intel_fan(tokens[1]);
+      IntelFanState *fan = fan_find(tokens[1]);
       uint32_t pwm = strtoul(tokens[3], NULL, 10);
       if (fan == NULL)
       {
@@ -2661,9 +1991,9 @@ static void process_command_line(char *line)
         uart_write_line("err invalid fan pwm");
         return;
       }
-      intel_fan_set_pwm(fan, (uint8_t)pwm);
+      fan_set_pwm(fan, (uint8_t)pwm);
       printf("ok fan %s pwm %lu\r\n", fan->key, (unsigned long)pwm);
-      emit_all_fan_states();
+      fan_emit_all_states();
       return;
     }
   }
@@ -2672,7 +2002,7 @@ static void process_command_line(char *line)
   {
     if (token_count >= 2U && strcmp(tokens[1], "status") == 0)
     {
-      emit_all_servo_states();
+      servo_emit_all_states();
       return;
     }
 
@@ -2684,17 +2014,12 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[1], "all") == 0)
     {
-      size_t i;
       if (strcmp(tokens[2], "angle") == 0)
       {
         uint16_t angle = (uint16_t)strtoul(tokens[3], NULL, 10);
-        uint16_t pulse = servo_angle_to_us(angle);
-        for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-        {
-          servos[i].pulse_us = pulse;
-        }
+        servo_set_all_angle(angle);
         printf("ok servo all angle %u\r\n", (unsigned)angle);
-        emit_all_servo_states();
+        servo_emit_all_states();
         return;
       }
       if (strcmp(tokens[2], "us") == 0)
@@ -2705,12 +2030,9 @@ static void process_command_line(char *line)
           uart_write_line("err invalid servo pulse");
           return;
         }
-        for (i = 0U; i < sizeof(servos) / sizeof(servos[0]); i++)
-        {
-          servos[i].pulse_us = pulse;
-        }
+        servo_set_all_pulse_us(pulse);
         printf("ok servo all us %u\r\n", (unsigned)pulse);
-        emit_all_servo_states();
+        servo_emit_all_states();
         return;
       }
       uart_write_line("err invalid servo field");
@@ -2718,7 +2040,7 @@ static void process_command_line(char *line)
     }
 
     {
-      ServoState *servo = find_servo(tokens[1]);
+      ServoState *servo = servo_find(tokens[1]);
       if (servo == NULL)
       {
         uart_write_line("err unknown servo");
@@ -2728,10 +2050,11 @@ static void process_command_line(char *line)
       if (strcmp(tokens[2], "angle") == 0)
       {
         uint16_t angle = (uint16_t)strtoul(tokens[3], NULL, 10);
-        servo->pulse_us = servo_angle_to_us(angle);
-        printf("ok servo %s angle %u us %u\r\n",
+        servo_set_angle(servo, angle);
+        printf("ok servo %s angle_req %u angle %u us %u\r\n",
                servo->key,
                (unsigned)angle,
+               (unsigned)servo_us_to_angle(servo->pulse_us),
                (unsigned)servo->pulse_us);
         return;
       }
@@ -2744,7 +2067,7 @@ static void process_command_line(char *line)
           uart_write_line("err invalid servo pulse");
           return;
         }
-        servo->pulse_us = pulse;
+        servo_set_pulse_us(servo, pulse);
         printf("ok servo %s us %u angle %u\r\n",
                servo->key,
                (unsigned)servo->pulse_us,
@@ -2863,13 +2186,17 @@ static void process_command_line(char *line)
   }
 
   AxisState *axis = find_axis(tokens[1]);
+  uint8_t axis_is_a = (strcmp(tokens[1], "a") == 0) ? 1U : 0U;
+  uint8_t axis_is_b = 0U;
   if (axis == NULL)
   {
     uart_write_line("err unknown axis");
     return;
   }
 
-  if (axis == b_axis_state())
+  axis_is_b = (axis == b_axis_state()) ? 1U : 0U;
+
+  if (axis_is_a || axis_is_b)
   {
     if (strcmp(tokens[2], "enable") == 0)
     {
@@ -2880,8 +2207,10 @@ static void process_command_line(char *line)
       }
       if (strcmp(tokens[3], "on") == 0)
       {
-        axis->enabled = 1U;
+        axes[0].enabled = 1U;
+        axes[1].enabled = 1U;
         apply_axis_enable_state();
+        a_axis_motion_set_enabled(1U);
         b_axis_motion_set_enabled(1U);
         printf("ok axis %s enable on\r\n", axis->key);
         emit_axis_state(axis);
@@ -2889,7 +2218,9 @@ static void process_command_line(char *line)
       }
       if (strcmp(tokens[3], "off") == 0)
       {
-        axis->enabled = 0U;
+        axes[0].enabled = 0U;
+        axes[1].enabled = 0U;
+        a_axis_motion_set_enabled(0U);
         b_axis_motion_set_enabled(0U);
         apply_axis_enable_state();
         printf("ok axis %s enable off\r\n", axis->key);
@@ -2900,35 +2231,60 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[2], "home") == 0)
     {
-      if (axis->enabled == 0U)
+      if (axes[0].enabled == 0U || axes[1].enabled == 0U)
       {
-        axis->enabled = 1U;
+        axes[0].enabled = 1U;
+        axes[1].enabled = 1U;
         apply_axis_enable_state();
+        a_axis_motion_set_enabled(1U);
         b_axis_motion_set_enabled(1U);
       }
       printf("ok axis %s home\r\n", axis->key);
-      b_axis_motion_home();
+      if (axis_is_a)
+      {
+        a_axis_motion_home();
+      }
+      else
+      {
+        b_axis_motion_home();
+      }
       emit_axis_state(axis);
       return;
     }
 
     if (strcmp(tokens[2], "scan") == 0)
     {
-      if (axis->enabled == 0U)
+      if (axes[0].enabled == 0U || axes[1].enabled == 0U)
       {
-        axis->enabled = 1U;
+        axes[0].enabled = 1U;
+        axes[1].enabled = 1U;
         apply_axis_enable_state();
+        a_axis_motion_set_enabled(1U);
         b_axis_motion_set_enabled(1U);
       }
       printf("ok axis %s scan\r\n", axis->key);
-      b_axis_motion_scan();
+      if (axis_is_a)
+      {
+        a_axis_motion_scan();
+      }
+      else
+      {
+        b_axis_motion_scan();
+      }
       emit_axis_state(axis);
       return;
     }
 
     if (strcmp(tokens[2], "stop") == 0)
     {
-      b_axis_motion_stop();
+      if (axis_is_a)
+      {
+        a_axis_motion_stop();
+      }
+      else
+      {
+        b_axis_motion_stop();
+      }
       printf("ok axis %s stop\r\n", axis->key);
       emit_axis_state(axis);
       return;
@@ -2950,7 +2306,14 @@ static void process_command_line(char *line)
       }
       axis->tuned_travel_steps = travel_steps;
       axis->scan_travel_steps = (int32_t)travel_steps;
-      b_axis_motion_set_travel(travel_steps);
+      if (axis_is_a)
+      {
+        a_axis_motion_set_travel(travel_steps);
+      }
+      else
+      {
+        b_axis_motion_set_travel(travel_steps);
+      }
       printf("ok axis %s travel %lu\r\n", axis->key, (unsigned long)travel_steps);
       emit_axis_state(axis);
       return;
@@ -2971,7 +2334,14 @@ static void process_command_line(char *line)
         return;
       }
       axis->decel_window_steps = decel_window_steps;
-      b_axis_motion_set_decel_window(decel_window_steps);
+      if (axis_is_a)
+      {
+        a_axis_motion_set_decel_window(decel_window_steps);
+      }
+      else
+      {
+        b_axis_motion_set_decel_window(decel_window_steps);
+      }
       printf("ok axis %s decel_window %lu\r\n", axis->key, (unsigned long)decel_window_steps);
       emit_axis_state(axis);
       return;
@@ -2984,14 +2354,24 @@ static void process_command_line(char *line)
         uart_write_line("err missing jog direction");
         return;
       }
-      if (axis->enabled == 0U)
+      if (axes[0].enabled == 0U || axes[1].enabled == 0U)
       {
-        axis->enabled = 1U;
+        axes[0].enabled = 1U;
+        axes[1].enabled = 1U;
         apply_axis_enable_state();
+        a_axis_motion_set_enabled(1U);
         b_axis_motion_set_enabled(1U);
       }
-      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
-      b_axis_motion_jog((strcmp(tokens[3], "-") == 0) ? -1 : 1);
+      if (axis_is_a)
+      {
+        a_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+        a_axis_motion_jog((strcmp(tokens[3], "-") == 0) ? -1 : 1);
+      }
+      else
+      {
+        b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+        b_axis_motion_jog((strcmp(tokens[3], "-") == 0) ? -1 : 1);
+      }
       printf("ok axis %s jog %s\r\n", axis->key, strcmp(tokens[3], "-") == 0 ? "-" : "+");
       emit_axis_state(axis);
       return;
@@ -3005,15 +2385,30 @@ static void process_command_line(char *line)
         uart_write_line("err missing move delta");
         return;
       }
-      if (axis->enabled == 0U)
+      if (axis->homed == 0U)
       {
-        axis->enabled = 1U;
+        uart_write_line("err axis not_homed");
+        return;
+      }
+      if (axes[0].enabled == 0U || axes[1].enabled == 0U)
+      {
+        axes[0].enabled = 1U;
+        axes[1].enabled = 1U;
         apply_axis_enable_state();
+        a_axis_motion_set_enabled(1U);
         b_axis_motion_set_enabled(1U);
       }
       delta = strtol(tokens[3], NULL, 10);
-      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
-      b_axis_motion_move_relative((int32_t)delta);
+      if (axis_is_a)
+      {
+        a_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+        a_axis_motion_move_relative((int32_t)delta);
+      }
+      else
+      {
+        b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+        b_axis_motion_move_relative((int32_t)delta);
+      }
       printf("ok axis %s move %ld\r\n", axis->key, delta);
       emit_axis_state(axis);
       return;
@@ -3022,21 +2417,35 @@ static void process_command_line(char *line)
     if (strcmp(tokens[2], "goto") == 0)
     {
       long target = 0;
-      long delta;
       if (token_count < 4U)
       {
         uart_write_line("err missing goto target");
         return;
       }
-      if (axis->enabled == 0U)
+      if (axis->homed == 0U)
       {
-        axis->enabled = 1U;
+        uart_write_line("err axis not_homed");
+        return;
+      }
+      if (axes[0].enabled == 0U || axes[1].enabled == 0U)
+      {
+        axes[0].enabled = 1U;
+        axes[1].enabled = 1U;
         apply_axis_enable_state();
+        a_axis_motion_set_enabled(1U);
         b_axis_motion_set_enabled(1U);
       }
       target = strtol(tokens[3], NULL, 10);
-      b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
-      b_axis_motion_goto((int32_t)target);
+      if (axis_is_a)
+      {
+        a_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+        a_axis_motion_goto((int32_t)target);
+      }
+      else
+      {
+        b_axis_motion_set_cruise_interval(axis->cruise_interval_us);
+        b_axis_motion_goto((int32_t)target);
+      }
       printf("ok axis %s goto %ld\r\n", axis->key, target);
       emit_axis_state(axis);
       return;
@@ -3334,221 +2743,281 @@ static void process_command_line(char *line)
   uart_write_line("err unsupported command");
 }
 
-static void tick_axes_timer_isr(void)
-{
-  size_t i;
-  for (i = 0U; i < sizeof(axes) / sizeof(axes[0]); i++)
-  {
-    AxisState *axis = &axes[i];
-    uint32_t target_interval;
-    int32_t remaining;
-    uint32_t decel_steps;
-
-    if (axis == b_axis_state())
-    {
-      continue;
-    }
-
-    if (axis->step_high_ticks > 0U)
-    {
-      axis->step_high_ticks--;
-      if (axis->step_high_ticks == 0U)
-      {
-        HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_RESET);
-        axis->position += axis->velocity;
-        axis->timer_countdown_ticks = axis_timer_ticks_from_us(axis->step_interval_ticks);
-
-        if (axis->target != INT32_MAX && axis->target != INT32_MIN && axis->position == axis->target)
-        {
-          axis_stop_motion(axis);
-          axis->state_dirty = 1U;
-        }
-      }
-      continue;
-    }
-
-    if (axis->dir_setup_ticks > 0U)
-    {
-      axis->dir_setup_ticks--;
-      if (axis->dir_setup_ticks == 0U)
-      {
-        HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_SET);
-        axis->step_high_ticks = 2U;
-      }
-      continue;
-    }
-
-    if (!axis->moving || !axis->enabled)
-    {
-      continue;
-    }
-    if (axis->timer_countdown_ticks > 0U)
-    {
-      axis->timer_countdown_ticks--;
-      continue;
-    }
-    if (axis->homing_state == 1U)
-    {
-      if (axis_min_endstop_triggered(axis))
-      {
-        axis_begin_motion(axis, 1, INT32_MAX, 2U);
-        axis->state_dirty = 1U;
-        continue;
-      }
-      pulse_axis_step(axis, axis->velocity);
-      continue;
-    }
-    if (axis->homing_state == 2U)
-    {
-      if (!axis_min_endstop_triggered(axis))
-      {
-        axis->position = 0;
-        axis->homed = 1U;
-        axis_stop_motion(axis);
-        axis->state_dirty = 1U;
-        continue;
-      }
-      pulse_axis_step(axis, axis->velocity);
-      continue;
-    }
-    if (axis->homing_state == 3U)
-    {
-      if (axis_min_endstop_triggered(axis))
-      {
-        axis_begin_motion(axis, 1, INT32_MAX, 4U);
-        axis->state_dirty = 1U;
-        continue;
-      }
-      pulse_axis_step(axis, axis->velocity);
-      continue;
-    }
-    if (axis->homing_state == 4U)
-    {
-      if (!axis_min_endstop_triggered(axis))
-      {
-        axis->position = 0;
-        axis_begin_motion(axis, 1, INT32_MAX, 5U);
-        axis->state_dirty = 1U;
-        continue;
-      }
-      pulse_axis_step(axis, axis->velocity);
-      continue;
-    }
-    if (axis->homing_state == 5U)
-    {
-      if (axis_max_endstop_triggered(axis))
-      {
-        axis->scan_travel_steps = axis->position;
-        axis_begin_motion(axis, -1, INT32_MIN, 6U);
-        axis->state_dirty = 1U;
-        continue;
-      }
-      pulse_axis_step(axis, axis->velocity);
-      continue;
-    }
-    if (axis->homing_state == 6U)
-    {
-      if (!axis_max_endstop_triggered(axis))
-      {
-        axis->position = axis->scan_travel_steps;
-        axis->homed = 1U;
-        axis_stop_motion(axis);
-        printf("ok axis %s scan travel_steps %ld\r\n", axis->key, (long)axis->scan_travel_steps);
-        axis->state_dirty = 1U;
-        continue;
-      }
-      pulse_axis_step(axis, axis->velocity);
-      continue;
-    }
-    if (axis->position == axis->target)
-    {
-      axis_stop_motion(axis);
-      axis->state_dirty = 1U;
-      continue;
-    }
-    if (axis->velocity < 0 && axis_min_endstop_triggered(axis))
-    {
-      axis_stop_motion(axis);
-      axis->state_dirty = 1U;
-      continue;
-    }
-    if (axis->velocity > 0 && axis_max_endstop_triggered(axis))
-    {
-      axis_stop_motion(axis);
-      axis->state_dirty = 1U;
-      continue;
-    }
-    remaining = axis->target - axis->position;
-    if (remaining < 0)
-    {
-      remaining = -remaining;
-    }
-    decel_steps = (uint32_t)((axis->start_interval_us - axis->cruise_interval_us) / axis->accel_interval_delta_us) + 2U;
-    if (axis->target == INT32_MAX || axis->target == INT32_MIN)
-    {
-      target_interval = (axis->homing_state != 0U) ? axis->homing_interval_us : axis_target_interval_us(axis);
-      if (axis->step_interval_ticks > target_interval)
-      {
-        uint32_t next_interval = axis->step_interval_ticks;
-        uint32_t cruise_ticks = target_interval;
-        uint32_t delta_ticks = axis->accel_interval_delta_us;
-        if ((next_interval - cruise_ticks) > delta_ticks)
-        {
-          next_interval -= delta_ticks;
-        }
-        else
-        {
-          next_interval = cruise_ticks;
-        }
-        axis->step_interval_ticks = next_interval;
-      }
-      else if (axis->step_interval_ticks < target_interval)
-      {
-        uint32_t next_interval = axis->step_interval_ticks + axis->accel_interval_delta_us;
-        axis->step_interval_ticks = (next_interval > target_interval) ? target_interval : next_interval;
-      }
-    }
-    else if ((uint32_t)remaining <= decel_steps)
-    {
-      uint32_t start_ticks = axis->start_interval_us;
-      uint32_t delta_ticks = axis->accel_interval_delta_us;
-      if (axis->step_interval_ticks < start_ticks)
-      {
-        uint32_t next_interval = axis->step_interval_ticks + delta_ticks;
-        axis->step_interval_ticks = (next_interval > start_ticks) ? start_ticks : next_interval;
-      }
-    }
-    else if (axis->step_interval_ticks > axis->cruise_interval_us)
-    {
-      uint32_t next_interval = axis->step_interval_ticks;
-      uint32_t cruise_ticks = axis->cruise_interval_us;
-      uint32_t delta_ticks = axis->accel_interval_delta_us;
-      if ((next_interval - cruise_ticks) > delta_ticks)
-      {
-        next_interval -= delta_ticks;
-      }
-      else
-      {
-        next_interval = cruise_ticks;
-      }
-      axis->step_interval_ticks = next_interval;
-    }
-    pulse_axis_step(axis, axis->velocity);
-  }
-}
-
 static void tick_axes(void)
 {
   emit_dirty_axis_states();
+}
+
+static uint8_t coord_motion_active(void)
+{
+  return coord_motion.active;
+}
+
+static void coord_motion_stop(void)
+{
+  HAL_TIM_Base_Stop_IT(&htim6);
+  coord_motion.active = 0U;
+  coord_motion.pulse_high_phase = 0U;
+  coord_motion.a_step_pending = 0U;
+  coord_motion.b_step_pending = 0U;
+  HAL_GPIO_WritePin(A_STEP_GPIO_Port, A_STEP_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+}
+
+static void coord_motion_emit_state(void)
+{
+  printf("ab active %s pos_a %ld target_a %ld pos_b %ld target_b %ld steps_done %lu steps_total %lu interval_us %lu cruise_us %lu start_us %lu\r\n",
+         coord_motion.active ? "on" : "off",
+         (long)coord_motion.a_position,
+         (long)coord_motion.a_target,
+         (long)coord_motion.b_position,
+         (long)coord_motion.b_target,
+         (unsigned long)coord_motion.steps_done,
+         (unsigned long)coord_motion.steps_total,
+         (unsigned long)coord_motion.current_interval_us,
+         (unsigned long)coord_motion.cruise_interval_us,
+         (unsigned long)coord_motion.start_interval_us);
+}
+
+static uint32_t coord_motion_ease_interval(uint32_t phase_steps,
+                                           uint32_t ramp_steps,
+                                           uint32_t start_interval_us,
+                                           uint32_t cruise_interval_us)
+{
+  uint32_t progress_q16;
+  uint64_t t;
+  uint64_t t2_q16;
+  uint64_t t3_q16;
+  uint64_t t4_q16;
+  uint64_t t5_q16;
+  int64_t ease_q16;
+  uint32_t span_us;
+
+  if (ramp_steps == 0U || start_interval_us <= cruise_interval_us)
+  {
+    return cruise_interval_us;
+  }
+
+  if (phase_steps >= ramp_steps)
+  {
+    return cruise_interval_us;
+  }
+
+  progress_q16 = (uint32_t)(((uint64_t)phase_steps << 16) / (uint64_t)ramp_steps);
+  t = progress_q16;
+  t2_q16 = (t * t) >> 16;
+  t3_q16 = (t2_q16 * t) >> 16;
+  t4_q16 = (t3_q16 * t) >> 16;
+  t5_q16 = (t4_q16 * t) >> 16;
+
+  /* Quintic smootherstep: 6t^5 - 15t^4 + 10t^3 */
+  ease_q16 = (int64_t)(10ULL * t3_q16)
+           - (int64_t)(15ULL * t4_q16)
+           + (int64_t)(6ULL * t5_q16);
+
+  if (ease_q16 < 0)
+  {
+    ease_q16 = 0;
+  }
+  else if (ease_q16 > 65536)
+  {
+    ease_q16 = 65536;
+  }
+
+  span_us = start_interval_us - cruise_interval_us;
+  return start_interval_us -
+         (uint32_t)(((uint64_t)span_us * (uint64_t)ease_q16) >> 16);
+}
+
+static uint8_t coord_motion_start(int32_t a_target, int32_t b_target)
+{
+  AAxisMotionSnapshot a_snapshot;
+  BAxisMotionSnapshot b_snapshot;
+  uint32_t a_abs_steps;
+  uint32_t b_abs_steps;
+
+  a_axis_motion_get_snapshot(&a_snapshot);
+  b_axis_motion_get_snapshot(&b_snapshot);
+
+  if (a_snapshot.enabled == 0U || b_snapshot.enabled == 0U)
+  {
+    uart_write_line("err ab disabled");
+    return 0U;
+  }
+
+  if (a_snapshot.homed == 0U || b_snapshot.homed == 0U)
+  {
+    uart_write_line("err ab not_homed");
+    return 0U;
+  }
+
+  coord_motion.a_position = a_snapshot.position;
+  coord_motion.b_position = b_snapshot.position;
+  coord_motion.a_target = a_target;
+  coord_motion.b_target = b_target;
+  coord_motion.a_direction = (a_target > a_snapshot.position) ? 1 : ((a_target < a_snapshot.position) ? -1 : 0);
+  coord_motion.b_direction = (b_target > b_snapshot.position) ? 1 : ((b_target < b_snapshot.position) ? -1 : 0);
+
+  a_abs_steps = (uint32_t)((a_target >= a_snapshot.position) ? (a_target - a_snapshot.position) : (a_snapshot.position - a_target));
+  b_abs_steps = (uint32_t)((b_target >= b_snapshot.position) ? (b_target - b_snapshot.position) : (b_snapshot.position - b_target));
+
+  coord_motion.a_abs_steps = a_abs_steps;
+  coord_motion.b_abs_steps = b_abs_steps;
+  coord_motion.steps_total = (a_abs_steps > b_abs_steps) ? a_abs_steps : b_abs_steps;
+  coord_motion.steps_done = 0U;
+  coord_motion.a_err = 0U;
+  coord_motion.b_err = 0U;
+  coord_motion.a_step_pending = 0U;
+  coord_motion.b_step_pending = 0U;
+  coord_motion.pulse_high_phase = 0U;
+
+  if (coord_motion.steps_total == 0U)
+  {
+    coord_motion.active = 0U;
+    return 1U;
+  }
+
+  coord_motion.cruise_interval_us = AB_COORD_CRUISE_INTERVAL_US;
+  coord_motion.start_interval_us = AB_COORD_START_INTERVAL_US;
+  coord_motion.accel_delta_us = AB_COORD_ACCEL_DELTA_US;
+
+  coord_motion.current_interval_us = coord_motion.start_interval_us;
+  coord_motion.active = 1U;
+
+  HAL_TIM_Base_Stop_IT(&htim6);
+  HAL_GPIO_WritePin(A_DIR_GPIO_Port, A_DIR_Pin, (coord_motion.a_direction >= 0) ? GPIO_PIN_RESET : GPIO_PIN_SET);
+  HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, (coord_motion.b_direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  __HAL_TIM_SET_AUTORELOAD(&htim6, (coord_motion.current_interval_us > 5U) ? (coord_motion.current_interval_us - 5U) : 10U);
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
+  HAL_TIM_Base_Start_IT(&htim6);
+  return 1U;
+}
+
+static void coord_motion_irq(void)
+{
+  if (coord_motion.active == 0U)
+  {
+    coord_motion_stop();
+    return;
+  }
+
+  if (coord_motion.pulse_high_phase == 0U)
+  {
+    coord_motion.a_step_pending = 0U;
+    coord_motion.b_step_pending = 0U;
+
+    if (coord_motion.steps_done >= coord_motion.steps_total)
+    {
+      a_axis_motion_set_position(coord_motion.a_position, 1U);
+      b_axis_motion_set_position(coord_motion.b_position, 1U);
+      coord_motion_stop();
+      coord_motion_emit_state();
+      emit_axis_state(&axes[0]);
+      emit_axis_state(&axes[1]);
+      return;
+    }
+
+    coord_motion.a_err += coord_motion.a_abs_steps;
+    if (coord_motion.a_err >= coord_motion.steps_total && coord_motion.a_direction != 0)
+    {
+      coord_motion.a_err -= coord_motion.steps_total;
+      coord_motion.a_step_pending = 1U;
+      HAL_GPIO_WritePin(A_STEP_GPIO_Port, A_STEP_Pin, GPIO_PIN_SET);
+    }
+
+    coord_motion.b_err += coord_motion.b_abs_steps;
+    if (coord_motion.b_err >= coord_motion.steps_total && coord_motion.b_direction != 0)
+    {
+      coord_motion.b_err -= coord_motion.steps_total;
+      coord_motion.b_step_pending = 1U;
+      HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_SET);
+    }
+
+    coord_motion.pulse_high_phase = 1U;
+    __HAL_TIM_SET_AUTORELOAD(&htim6, 5U - 1U);
+    __HAL_TIM_SET_COUNTER(&htim6, 0U);
+    return;
+  }
+
+  HAL_GPIO_WritePin(A_STEP_GPIO_Port, A_STEP_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+
+  if (coord_motion.a_step_pending != 0U)
+  {
+    coord_motion.a_position += coord_motion.a_direction;
+  }
+  if (coord_motion.b_step_pending != 0U)
+  {
+    coord_motion.b_position += coord_motion.b_direction;
+  }
+
+  coord_motion.steps_done++;
+  {
+    uint32_t remaining_steps = (coord_motion.steps_done >= coord_motion.steps_total)
+                                 ? 0U
+                                 : (coord_motion.steps_total - coord_motion.steps_done);
+    uint32_t ramp_steps = coord_motion.steps_total / 11U;
+    uint32_t ramp_span = (coord_motion.start_interval_us > coord_motion.cruise_interval_us)
+                           ? (coord_motion.start_interval_us - coord_motion.cruise_interval_us)
+                           : 0U;
+
+    if (ramp_steps < AB_COORD_MIN_RAMP_STEPS)
+    {
+      ramp_steps = AB_COORD_MIN_RAMP_STEPS;
+    }
+    if (coord_motion.steps_total > 1U && (ramp_steps * 2U) > coord_motion.steps_total)
+    {
+      ramp_steps = coord_motion.steps_total / 2U;
+    }
+
+    if (ramp_steps == 0U || ramp_span == 0U)
+    {
+      coord_motion.current_interval_us = coord_motion.cruise_interval_us;
+    }
+    else if (coord_motion.steps_done < ramp_steps)
+    {
+      coord_motion.current_interval_us =
+        coord_motion_ease_interval(coord_motion.steps_done,
+                                   ramp_steps,
+                                   coord_motion.start_interval_us,
+                                   coord_motion.cruise_interval_us);
+    }
+    else if (remaining_steps < ramp_steps)
+    {
+      coord_motion.current_interval_us =
+        coord_motion_ease_interval(remaining_steps,
+                                   ramp_steps,
+                                   coord_motion.start_interval_us,
+                                   coord_motion.cruise_interval_us);
+    }
+    else
+    {
+      coord_motion.current_interval_us = coord_motion.cruise_interval_us;
+    }
+  }
+  coord_motion.pulse_high_phase = 0U;
+  __HAL_TIM_SET_AUTORELOAD(&htim6, (coord_motion.current_interval_us > 5U) ? (coord_motion.current_interval_us - 5U) : 10U);
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM6)
   {
+    if (coord_motion_active() != 0U)
+    {
+      coord_motion_irq();
+      return;
+    }
+    if (a_axis_motion_active() != 0U)
+    {
+      a_axis_motion_irq();
+      return;
+    }
     if (b_axis_motion_active() != 0U)
     {
       b_axis_motion_irq();
+      return;
     }
   }
 }
@@ -3560,7 +3029,6 @@ int main(void)
   static const uint8_t boot_u3[] = "BOOT U3\r\n";
   static const uint8_t boot_t3[] = "BOOT T3\r\n";
   static const uint8_t boot_t4[] = "BOOT T4\r\n";
-  static const uint8_t boot_i2c[] = "BOOT I2C\r\n";
   HAL_Init();
   SystemClock_Config();
   MX_GPIO_Init();
@@ -3568,30 +3036,56 @@ int main(void)
   HAL_UART_Transmit(&huart1, (uint8_t *)boot_u1, sizeof(boot_u1) - 1U, 0xFFFFU);
   MX_USART2_UART_Init();
   HAL_UART_Transmit(&huart1, (uint8_t *)boot_u3, sizeof(boot_u3) - 1U, 0xFFFFU);
+  MX_TIM1_Init();
+  MX_TIM2_Init();
   MX_TIM3_Init();
   HAL_UART_Transmit(&huart1, (uint8_t *)boot_t3, sizeof(boot_t3) - 1U, 0xFFFFU);
   MX_TIM4_Init();
   HAL_UART_Transmit(&huart1, (uint8_t *)boot_t4, sizeof(boot_t4) - 1U, 0xFFFFU);
   MX_TIM6_Init();
-  MX_I2C1_Init();
-  HAL_UART_Transmit(&huart1, (uint8_t *)boot_i2c, sizeof(boot_i2c) - 1U, 0xFFFFU);
+  MX_TIM8_Init();
+  MX_TIM16_Init();
+  MX_TIM17_Init();
 
-  printf("\r\nSTM32G431RB #02 boot\r\n");
-  printf("USART1 on PC4/PC5 via CN10-35/37, 115200 8N1\r\n");
-  printf("USART3 on PB10/PB11 for TMC2209 UART\r\n");
-  printf("I2C1 OLED on PB8/PB9 addr 0x3C\r\n");
-  printf("servos fan1 PA6 fan2 PA7 pan1 PB6 pan2 PA1 lid PA4, 50Hz software PWM\r\n");
-  printf("intel fans fan1 pwm PC6 tach PC9 fan2 pwm PC8 tach PB7, 25kHz open-drain pwm\r\n");
-  printf("fan power relays fan1 PA12 fan2 PC1 active_high\r\n");
-  printf("byj steppers via step/dir drivers: byj1 step PB12 dir PB13 en PB14 endstop PB3 byj2 step PB15 dir PC10 en PC11\r\n");
-  printf("magnet pwm PA11 via TIM4_CH1\r\n");
-  printf("driver config a=%u b=%u\r\n", (unsigned)axes[0].driver_addr, (unsigned)axes[1].driver_addr);
+  printf("\r\nSTM32G431RB #02 boot host_uart=USART1 tmc_uart=USART3 driver_a=%u driver_b=%u\r\n",
+         (unsigned)axes[0].driver_addr,
+         (unsigned)axes[1].driver_addr);
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   DWT->CYCCNT = 0U;
+  servo_init();
+  a_axis_motion_init();
   b_axis_motion_init();
   byj1_motion_init();
   byj2_motion_init();
+  {
+    AAxisMotionSnapshot a_snapshot = {0};
+    BAxisMotionSnapshot b_snapshot = {0};
+    uint32_t persisted_a_travel = 0U;
+    uint32_t persisted_b_travel = 0U;
+    a_axis_motion_get_snapshot(&a_snapshot);
+    b_axis_motion_get_snapshot(&b_snapshot);
+    axis_travel_store_init(a_snapshot.travel_steps, b_snapshot.travel_steps);
+    if (axis_travel_store_get(&persisted_a_travel, &persisted_b_travel) != 0U)
+    {
+      a_axis_motion_set_travel(persisted_a_travel);
+      b_axis_motion_set_travel(persisted_b_travel);
+      axes[0].scan_travel_steps = (int32_t)persisted_a_travel;
+      axes[0].tuned_travel_steps = persisted_a_travel;
+      axes[1].scan_travel_steps = (int32_t)persisted_b_travel;
+      axes[1].tuned_travel_steps = persisted_b_travel;
+      printf("travel load a %lu b %lu\r\n",
+             (unsigned long)persisted_a_travel,
+             (unsigned long)persisted_b_travel);
+    }
+  }
+  a_axis_motion_set_enabled(axes[0].enabled);
+  a_axis_motion_set_travel(axes[0].tuned_travel_steps);
+  a_axis_motion_set_decel_window(axes[0].decel_window_steps);
+  a_axis_motion_set_start_interval(axes[0].start_interval_us);
+  a_axis_motion_set_cruise_interval(axes[0].cruise_interval_us);
+  a_axis_motion_set_homing_interval(axes[0].homing_interval_us);
+  a_axis_motion_set_accel_delta(axes[0].accel_interval_delta_us);
   b_axis_motion_set_enabled(axes[1].enabled);
   b_axis_motion_set_travel(axes[1].tuned_travel_steps);
   b_axis_motion_set_decel_window(axes[1].decel_window_steps);
@@ -3599,21 +3093,22 @@ int main(void)
   b_axis_motion_set_cruise_interval(axes[1].cruise_interval_us);
   b_axis_motion_set_homing_interval(axes[1].homing_interval_us);
   b_axis_motion_set_accel_delta(axes[1].accel_interval_delta_us);
-  /* Keep main firmware close to the proven B-axis test while debugging B motion. */
+  host_uart_rx_start();
   tmc_uart_rx_start();
-  tmc_uart_boot_probe();
 
   while (1)
   {
-    uint8_t rx_byte = 0;
     static char rx_line[96];
     static size_t rx_len = 0U;
     static uint32_t last_led_toggle_ms = 0U;
     const uint32_t now_ms = HAL_GetTick();
 
-    while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE) != RESET)
+    host_uart_clear_errors();
+
+    while (host_rx_tail != host_rx_head)
     {
-      rx_byte = (uint8_t)(huart1.Instance->RDR & 0xFFU);
+      uint8_t rx_byte = host_rx_ring[host_rx_tail];
+      host_rx_tail = (uint16_t)((host_rx_tail + 1U) % (sizeof(host_rx_ring) / sizeof(host_rx_ring[0])));
       if (rx_byte == '\r' || rx_byte == '\n')
       {
         if (rx_len > 0U)
@@ -3636,7 +3131,10 @@ int main(void)
     }
 
     tick_axes();
+    a_axis_motion_update();
+    b_axis_motion_update();
     tick_byj_steppers();
+    servo_tick();
 
     if (now_ms - last_led_toggle_ms >= 250U)
     {
@@ -3648,6 +3146,17 @@ int main(void)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
+  if (huart->Instance == USART1)
+  {
+    uint16_t next_head = (uint16_t)((host_rx_head + 1U) % (sizeof(host_rx_ring) / sizeof(host_rx_ring[0])));
+    if (next_head != host_rx_tail)
+    {
+      host_rx_ring[host_rx_head] = host_rx_byte;
+      host_rx_head = next_head;
+    }
+    host_uart_rx_start();
+    return;
+  }
   if (huart->Instance == USART3)
   {
     uint16_t next_head = (uint16_t)((tmc_rx_head + 1U) % (sizeof(tmc_rx_ring) / sizeof(tmc_rx_ring[0])));
@@ -3662,6 +3171,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
+  if (huart->Instance == USART1)
+  {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_PEFLAG(huart);
+    host_uart_rx_start();
+    return;
+  }
   if (huart->Instance == USART3)
   {
     __HAL_UART_CLEAR_OREFLAG(huart);
@@ -3769,6 +3287,111 @@ static void MX_USART2_UART_Init(void)
   }
 }
 
+static void servo_timer_init_pwm(TIM_HandleTypeDef *htim, TIM_TypeDef *instance, uint32_t timer_clock_hz)
+{
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  uint32_t prescaler = timer_clock_hz / 1000000U;
+
+  if (prescaler == 0U)
+  {
+    prescaler = 1U;
+  }
+
+  htim->Instance = instance;
+  htim->Init.Prescaler = prescaler - 1U;
+  htim->Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim->Init.Period = 20000U - 1U;
+  htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim->Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+  if (HAL_TIM_PWM_Init(htim) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1500U;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+
+  if (instance == TIM2)
+  {
+    if (HAL_TIM_PWM_ConfigChannel(htim, &sConfigOC, TIM_CHANNEL_2) != HAL_OK ||
+        HAL_TIM_PWM_ConfigChannel(htim, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    if (HAL_TIM_PWM_Start(htim, TIM_CHANNEL_2) != HAL_OK ||
+        HAL_TIM_PWM_Start(htim, TIM_CHANNEL_3) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    return;
+  }
+
+  if (HAL_TIM_PWM_ConfigChannel(htim, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Start(htim, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_TIM2_Init(void)
+{
+  __HAL_RCC_TIM2_CLK_ENABLE();
+  servo_timer_init_pwm(&htim2, TIM2, HAL_RCC_GetPCLK1Freq());
+}
+
+static void MX_TIM1_Init(void)
+{
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  uint32_t tim_clk_hz = HAL_RCC_GetPCLK2Freq();
+  uint32_t prescaler = tim_clk_hz / 1000000U;
+
+  if (prescaler == 0U)
+  {
+    prescaler = 1U;
+  }
+
+  __HAL_RCC_TIM1_CLK_ENABLE();
+
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = prescaler - 1U;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 20000U - 1U;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0U;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1500U;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
 static void MX_TIM3_Init(void)
 {
   TIM_OC_InitTypeDef sConfigOC = {0};
@@ -3802,19 +3425,20 @@ static void MX_TIM3_Init(void)
   sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
 
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK ||
+      HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK ||
       HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
   }
 
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2) != HAL_OK ||
       HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
   }
 
-  intel_fan_set_pwm(&intel_fans[0], intel_fans[0].pwm_percent);
-  intel_fan_set_pwm(&intel_fans[1], intel_fans[1].pwm_percent);
+  fan_apply_initial_pwm();
 }
 
 static void MX_TIM4_Init(void)
@@ -3858,7 +3482,7 @@ static void MX_TIM4_Init(void)
     Error_Handler();
   }
 
-  magnet_set_pwm(magnet.pwm_percent);
+  magnet_set_pwm(0U);
 }
 
 static void MX_TIM6_Init(void)
@@ -3887,29 +3511,22 @@ static void MX_TIM6_Init(void)
   HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
 }
 
-static void MX_I2C1_Init(void)
+static void MX_TIM8_Init(void)
 {
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x00303D5BU;
-  hi2c1.Init.OwnAddress1 = 0U;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0U;
-  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0U) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  __HAL_RCC_TIM8_CLK_ENABLE();
+  servo_timer_init_pwm(&htim8, TIM8, HAL_RCC_GetPCLK2Freq());
+}
+
+static void MX_TIM16_Init(void)
+{
+  __HAL_RCC_TIM16_CLK_ENABLE();
+  servo_timer_init_pwm(&htim16, TIM16, HAL_RCC_GetPCLK2Freq());
+}
+
+static void MX_TIM17_Init(void)
+{
+  __HAL_RCC_TIM17_CLK_ENABLE();
+  servo_timer_init_pwm(&htim17, TIM17, HAL_RCC_GetPCLK2Freq());
 }
 
 static void MX_GPIO_Init(void)
@@ -3930,8 +3547,6 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(BYJ2_STEP_GPIO_Port, BYJ2_STEP_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BYJ2_DIR_GPIO_Port, BYJ2_DIR_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BYJ2_EN_GPIO_Port, BYJ2_EN_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOA, FAN1_SERVO_Pin|FAN2_SERVO_Pin|PAN2_SERVO_Pin|LID_SERVO_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(PAN1_SERVO_GPIO_Port, PAN1_SERVO_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(FAN1_POWER_RELAY_GPIO_Port, FAN1_POWER_RELAY_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(FAN2_POWER_RELAY_GPIO_Port, FAN2_POWER_RELAY_Pin, GPIO_PIN_RESET);
 
@@ -3972,23 +3587,44 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = BYJ2_DIR_Pin|BYJ2_EN_Pin;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = A_MIN_ENDSTOP_Pin|A_MAX_ENDSTOP_Pin;
+  GPIO_InitStruct.Pin = A_MIN_ENDSTOP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  GPIO_InitStruct.Pin = A_MAX_ENDSTOP_Pin;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   GPIO_InitStruct.Pin = B_MIN_ENDSTOP_Pin|B_MAX_ENDSTOP_Pin;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = FAN1_SERVO_Pin|FAN2_SERVO_Pin|PAN2_SERVO_Pin|LID_SERVO_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pin = FAN1_SERVO_Pin|FAN2_SERVO_Pin|PAN2_SERVO_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = FAN1_SERVO_Pin;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM16;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = PAN1_SERVO_Pin;
+  GPIO_InitStruct.Alternate = GPIO_AF5_TIM8;
   HAL_GPIO_Init(PAN1_SERVO_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = FAN2_SERVO_Pin;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM17;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = PAN2_SERVO_Pin;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = LID_SERVO_Pin;
+  GPIO_InitStruct.Alternate = GPIO_AF6_TIM1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = INTEL_FAN1_PWM_Pin|INTEL_FAN2_PWM_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
@@ -4022,13 +3658,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = INTEL_FAN2_TACH_Pin;
   HAL_GPIO_Init(INTEL_FAN2_TACH_GPIO_Port, &GPIO_InitStruct);
 
-  {
-    size_t i;
-    for (i = 0U; i < sizeof(fan_power_relays) / sizeof(fan_power_relays[0]); i++)
-    {
-      apply_fan_power_relay(&fan_power_relays[i]);
-    }
-  }
+  fan_power_relay_apply_all();
 }
 
 #if defined(__ICCARM__)

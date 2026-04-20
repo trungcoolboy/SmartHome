@@ -26,7 +26,7 @@ enum class LedMode : uint8_t {
 };
 
 bool relay_on = false;
-bool touch_down = false;
+bool touch_active = false;
 bool last_touch_raw = false;
 LedMode led_mode = LedMode::Auto;
 bool buzzer_active = false;
@@ -35,7 +35,10 @@ unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
 unsigned long last_wifi_begin_ms = 0;
 unsigned long last_mqtt_attempt_ms = 0;
-unsigned long last_touch_change_ms = 0;
+unsigned long last_touch_raw_change_ms = 0;
+unsigned long last_touch_toggle_ms = 0;
+unsigned long touch_ignore_until_ms = 0;
+unsigned long touch_release_stable_since_ms = 0;
 unsigned long last_local_action_ms = 0;
 unsigned long mqtt_retry_backoff_ms = 2000;
 bool wifi_begin_called = false;
@@ -44,9 +47,15 @@ bool state_dirty = false;
 const char* pending_event = "state_sync";
 const char* pending_detail = nullptr;
 bool time_configured = false;
+bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
+constexpr unsigned long kTouchPressDebounceMs = 450;
+constexpr unsigned long kTouchReleaseDebounceMs = 200;
+constexpr unsigned long kTouchRetriggerGuardMs = 2500;
+constexpr unsigned long kTouchIgnoreAfterRelayMs = 2500;
+constexpr unsigned long kTouchRearmReleaseStableMs = 600;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -191,28 +200,12 @@ void update_buzzer() {
 }
 
 void write_led() {
-  const bool touch_active = read_touch_active();
   if (!mqtt_client.connected()) {
     const int level = ((millis() / 180) % 2) ? 255 : 0;
     analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
     return;
   }
-  time_t now = time(nullptr);
-  bool breath = false;
-  if (now >= 100000) {
-    struct tm local_tm {};
-    localtime_r(&now, &local_tm);
-    const int hour = local_tm.tm_hour;
-    breath = NodeConfig::kLedBreathStartHour > NodeConfig::kLedBreathEndHour
-                 ? (hour >= NodeConfig::kLedBreathStartHour || hour < NodeConfig::kLedBreathEndHour)
-                 : (hour >= NodeConfig::kLedBreathStartHour && hour < NodeConfig::kLedBreathEndHour);
-  }
-
-  if (touch_active) {
-    analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? 255 : 0);
-    return;
-  }
-  const int level = current_led_level(breath);
+  const int level = relay_on ? 255 : 0;
   analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
 }
 
@@ -242,7 +235,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
     doc["detail"] = detail;
   }
   doc["relay"] = relay_on;
-  doc["touch"] = touch_down;
+  doc["touch"] = touch_active;
   doc["ledMode"] = led_mode_name(led_mode);
   doc["buzzer"] = buzzer_active;
 
@@ -263,7 +256,7 @@ bool publish_telemetry_now() {
   doc["ip"] = WiFi.localIP().toString();
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["relay"] = relay_on;
-  doc["touch"] = touch_down;
+  doc["touch"] = touch_active;
   doc["ledMode"] = led_mode_name(led_mode);
   doc["buzzer"] = buzzer_active;
 
@@ -300,6 +293,10 @@ void flush_pending_mqtt() {
 void set_relay(bool on, const char* event) {
   relay_on = on;
   last_local_action_ms = millis();
+  touch_ignore_until_ms = last_local_action_ms + kTouchIgnoreAfterRelayMs;
+  last_touch_toggle_ms = last_local_action_ms;
+  touch_armed = false;
+  touch_release_stable_since_ms = 0;
   apply_output();
   telemetry_dirty = true;
   queue_state(event, on ? "on" : "off");
@@ -457,29 +454,69 @@ void init_gpio() {
   pinMode(NodeConfig::kTouchPin, INPUT);
   write_buzzer(false);
   apply_output();
-  touch_down = read_touch_active();
-  last_touch_raw = touch_down;
-  last_touch_change_ms = millis();
+  last_touch_raw = read_touch_active();
+  touch_active = last_touch_raw;
+  last_touch_raw_change_ms = millis();
+  last_touch_toggle_ms = 0;
+  touch_ignore_until_ms = 0;
+  touch_release_stable_since_ms = touch_active ? 0 : millis();
+  touch_armed = !touch_active;
 }
 
 void poll_touch() {
-  const bool active = read_touch_active();
   const unsigned long now = millis();
-  if (active != last_touch_raw) {
-    last_touch_raw = active;
-    last_touch_change_ms = now;
-  }
+  const bool raw = read_touch_active();
 
-  if (touch_down == last_touch_raw || (now - last_touch_change_ms) < NodeConfig::kTouchDebounceMs) {
+  if (now < touch_ignore_until_ms) {
+    last_touch_raw = raw;
+    touch_active = raw;
+    last_touch_raw_change_ms = now;
+    if (!raw) {
+      if (touch_release_stable_since_ms == 0) {
+        touch_release_stable_since_ms = now;
+      }
+    } else {
+      touch_release_stable_since_ms = 0;
+    }
     return;
   }
 
-  touch_down = last_touch_raw;
-  if (touch_down) {
+  if (raw != last_touch_raw) {
+    last_touch_raw = raw;
+    last_touch_raw_change_ms = now;
+  }
+
+  if (raw == touch_active) {
+    if (!raw && !touch_armed) {
+      if (touch_release_stable_since_ms == 0) {
+        touch_release_stable_since_ms = now;
+      } else if ((now - touch_release_stable_since_ms) >= kTouchRearmReleaseStableMs) {
+        touch_armed = true;
+      }
+    } else if (raw) {
+      touch_release_stable_since_ms = 0;
+    }
+    return;
+  }
+
+  const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
+  if ((now - last_touch_raw_change_ms) < debounce_ms) {
+    return;
+  }
+
+  touch_active = raw;
+  if (!touch_active) {
+    touch_release_stable_since_ms = now;
+    telemetry_dirty = true;
+    queue_state("touch_release");
+    return;
+  }
+
+  touch_release_stable_since_ms = 0;
+  if (touch_armed && (now - last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+    touch_armed = false;
+    last_touch_toggle_ms = now;
     toggle_relay("touch_toggle");
-  } else {
-      telemetry_dirty = true;
-      queue_state("touch_release");
   }
 }
 
@@ -524,6 +561,6 @@ void loop() {
         WiFi.RSSI(),
         mqtt_client.connected() ? "up" : "down",
         relay_on ? "on" : "off",
-        touch_down ? "on" : "off");
+        touch_active ? "on" : "off");
   }
 }

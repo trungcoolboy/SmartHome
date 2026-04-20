@@ -26,7 +26,11 @@ LDLIBS := -Wl,--start-group -lc -lm -Wl,--end-group
 
 C_SOURCES := \
 	Src/main.c \
+	Src/a_axis_motion.c \
 	Src/b_axis_motion.c \
+	Src/axis_travel_store.c \
+	Src/servo_control.c \
+	Src/fan_control.c \
 	Src/byj1_motion.c \
 	Src/byj2_motion.c \
 	Src/syscalls.c \
@@ -42,8 +46,6 @@ C_SOURCES := \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_flash_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_flash_ramfunc.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_gpio.c \
-	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c.c \
-	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_i2c_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pwr_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_rcc.c \

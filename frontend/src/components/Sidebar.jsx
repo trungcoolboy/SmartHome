@@ -5,14 +5,8 @@ function Sidebar({ activePage, onNavigate }) {
   return (
     <aside className="sidebar-card">
       <div className="brand-block">
-        <span className="eyebrow">Smart Home + Aqua</span>
+        <span className="eyebrow">Smart Home</span>
         <h1>Control Center</h1>
-        <p>Unified control surface for room nodes, water systems and motion hardware.</p>
-      </div>
-
-      <div className="sidebar-highlight">
-        <span className="panel-label">Mission Focus</span>
-        <strong>Fast glance status, then deep technical control.</strong>
       </div>
 
       <nav className="nav-list" aria-label="Primary">

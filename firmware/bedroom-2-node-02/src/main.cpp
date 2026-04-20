@@ -15,10 +15,13 @@ constexpr char kRemoteNode01CommandTopic[] = "smarthome/bedroom-2-node-01/comman
 constexpr char kRemoteNode01StateTopic[] = "smarthome/bedroom-2-node-01/state";
 constexpr char kRemoteNode01TelemetryTopic[] = "smarthome/bedroom-2-node-01/telemetry";
 
-bool touch_down = false;
+bool touch_active = false;
 bool last_touch_raw = false;
 bool remote_relay_on = false;
-unsigned long last_touch_change_ms = 0;
+unsigned long last_touch_raw_change_ms = 0;
+unsigned long last_touch_toggle_ms = 0;
+unsigned long touch_ignore_until_ms = 0;
+unsigned long touch_release_stable_since_ms = 0;
 unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
 unsigned long last_wifi_begin_ms = 0;
@@ -30,10 +33,16 @@ bool telemetry_dirty = false;
 bool state_dirty = false;
 const char* pending_event = "state_sync";
 const char* pending_detail = nullptr;
+bool touch_armed = true;
 
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
+constexpr unsigned long kTouchPressDebounceMs = 450;
+constexpr unsigned long kTouchReleaseDebounceMs = 200;
+constexpr unsigned long kTouchRetriggerGuardMs = 2500;
+constexpr unsigned long kTouchIgnoreAfterToggleMs = 2500;
+constexpr unsigned long kTouchRearmReleaseStableMs = 600;
 
 bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
@@ -48,11 +57,11 @@ void update_led() {
     write_led(((millis() / 180) % 2) != 0);
     return;
   }
-  if (read_touch_active()) {
+  if (touch_active) {
     write_led(true);
     return;
   }
-  write_led(false);
+  write_led(remote_relay_on);
 }
 
 bool publish_availability(const char* value) {
@@ -72,7 +81,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["event"] = event;
   doc["uptimeMs"] = millis();
   doc["wifiRssi"] = WiFi.RSSI();
-  doc["touch"] = touch_down;
+  doc["touch"] = touch_active;
   doc["remoteRelay"] = remote_relay_on;
   if (detail && detail[0] != '\0') {
     doc["detail"] = detail;
@@ -94,7 +103,7 @@ bool publish_telemetry_now() {
   doc["wifiRssi"] = WiFi.RSSI();
   doc["ip"] = WiFi.localIP().toString();
   doc["freeHeap"] = ESP.getFreeHeap();
-  doc["touch"] = touch_down;
+  doc["touch"] = touch_active;
   doc["remoteRelay"] = remote_relay_on;
 
   char payload[256];
@@ -124,6 +133,9 @@ void flush_pending_mqtt() {
 
 void mark_local_action() {
   last_local_action_ms = millis();
+  touch_ignore_until_ms = last_local_action_ms + kTouchIgnoreAfterToggleMs;
+  touch_release_stable_since_ms = 0;
+  touch_armed = false;
 }
 
 void set_remote_relay_state(bool value, const char* event, const char* detail = nullptr) {
@@ -154,27 +166,65 @@ void handle_touch() {
 
   if (raw != last_touch_raw) {
     last_touch_raw = raw;
-    last_touch_change_ms = now_ms;
+    last_touch_raw_change_ms = now_ms;
   }
 
-  if ((now_ms - last_touch_change_ms) < NodeConfig::kTouchDebounceMs || raw == touch_down) {
+  if (now_ms < touch_ignore_until_ms) {
+    if (touch_active != raw) {
+      touch_active = raw;
+      update_led();
+      telemetry_dirty = true;
+    }
+    if (!raw) {
+      if (touch_release_stable_since_ms == 0) {
+        touch_release_stable_since_ms = now_ms;
+      }
+    } else {
+      touch_release_stable_since_ms = 0;
+    }
     return;
   }
 
-  touch_down = raw;
-  update_led();
-  mark_local_action();
+  if (raw == touch_active) {
+    if (!raw && !touch_armed) {
+      if (touch_release_stable_since_ms == 0) {
+        touch_release_stable_since_ms = now_ms;
+      } else if ((now_ms - touch_release_stable_since_ms) >= kTouchRearmReleaseStableMs) {
+        touch_armed = true;
+      }
+    } else if (raw) {
+      touch_release_stable_since_ms = 0;
+    }
+    return;
+  }
 
-  if (touch_down) {
+  const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
+  if ((now_ms - last_touch_raw_change_ms) < debounce_ms) {
+    return;
+  }
+
+  touch_active = raw;
+  update_led();
+
+  if (!touch_active) {
+    touch_release_stable_since_ms = now_ms;
+    queue_state("touch_release");
+    telemetry_dirty = true;
+    return;
+  }
+
+  touch_release_stable_since_ms = 0;
+  if (touch_armed && (now_ms - last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+    touch_armed = false;
+    last_touch_toggle_ms = now_ms;
+    mark_local_action();
     if (publish_remote_toggle()) {
       queue_state("remote_toggle_sent");
     } else {
       queue_state("remote_toggle_failed");
     }
-  } else {
-    queue_state("touch_release");
+    telemetry_dirty = true;
   }
-  telemetry_dirty = true;
 }
 
 void process_remote_payload(const uint8_t* payload, unsigned int length, const char* event_name) {
@@ -292,6 +342,12 @@ void init_gpio() {
   pinMode(NodeConfig::kTouchPin, INPUT);
   pinMode(NodeConfig::kLedPin, OUTPUT);
   analogWriteRange(255);
+  last_touch_raw = read_touch_active();
+  touch_active = last_touch_raw;
+  last_touch_raw_change_ms = millis();
+  last_touch_toggle_ms = 0;
+  touch_release_stable_since_ms = touch_active ? 0 : millis();
+  touch_armed = !touch_active;
   write_led(false);
 }
 
@@ -302,7 +358,7 @@ void status_log() {
                 WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                 mqtt_client.connected() ? "up" : "down",
                 remote_relay_on ? "on" : "off",
-                touch_down ? "on" : "off");
+                touch_active ? "on" : "off");
 }
 
 }  // namespace

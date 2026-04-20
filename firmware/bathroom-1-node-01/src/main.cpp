@@ -33,15 +33,18 @@ struct ChannelState {
   bool has_relay;
   bool relay_active_high;
   bool relay_on;
-  bool last_touch_active;
-  unsigned long last_touch_change_ms;
+  bool touch_active;
+  bool last_touch_raw;
+  unsigned long last_touch_raw_change_ms;
+  unsigned long last_touch_toggle_ms;
+  bool touch_armed;
   LedMode led_mode;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, 0, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, 0, LedMode::Auto},
-  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, 0, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, 0, true, LedMode::Auto},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, 0, true, LedMode::Auto},
+  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, 0, true, LedMode::Auto},
 };
 
 constexpr char kRemoteNode02CommandTopic[] = "smarthome/bathroom-1-node-02/command";
@@ -65,6 +68,9 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
+constexpr unsigned long kTouchPressDebounceMs = 250;
+constexpr unsigned long kTouchReleaseDebounceMs = 120;
+constexpr unsigned long kTouchRetriggerGuardMs = 2500;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -220,11 +226,10 @@ void update_leds() {
   const bool breath = is_led_breath_window();
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
-    const bool touch_active = read_touch_active(channel.touch_pin);
-    if (touch_active) {
-      write_led_level(channel.led_pin, 255);
-    } else if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
-      write_led_level(channel.led_pin, 0);
+    if (channel.has_relay) {
+      write_led_level(channel.led_pin, channel.relay_on ? 255 : 0);
+    } else if (strcmp(channel.key, "touch3") == 0) {
+      write_led_level(channel.led_pin, remote_node02_relay_on ? 255 : 0);
     } else {
       write_led_level(channel.led_pin, current_led_level(channel.led_mode, breath));
     }
@@ -266,7 +271,7 @@ bool publish_state_now(const char* event, const char* channel_key = nullptr, con
   for (const auto& channel : channels) {
     JsonObject item = channel_states.add<JsonObject>();
     item["key"] = channel.key;
-    item["touchActive"] = read_touch_active(channel.touch_pin);
+    item["touchActive"] = channel.touch_active;
     item["ledMode"] = led_mode_name(channel.led_mode);
     item["hasRelay"] = channel.has_relay;
     if (channel.has_relay) {
@@ -295,7 +300,7 @@ bool publish_telemetry_now() {
   for (const auto& channel : channels) {
     JsonObject item = channel_states.add<JsonObject>();
     item["key"] = channel.key;
-    item["touchActive"] = read_touch_active(channel.touch_pin);
+    item["touchActive"] = channel.touch_active;
     item["ledMode"] = led_mode_name(channel.led_mode);
     item["hasRelay"] = channel.has_relay;
     if (channel.has_relay) {
@@ -549,22 +554,37 @@ void poll_touch_inputs() {
   const unsigned long now = millis();
 
   for (auto& channel : channels) {
-    const bool active = read_touch_active(channel.touch_pin);
-    if (active != channel.last_touch_active) {
-      if ((now - channel.last_touch_change_ms) >= NodeConfig::kTouchDebounceMs) {
-        channel.last_touch_change_ms = now;
-        channel.last_touch_active = active;
-        apply_channel_output(channel);
-        if (active) {
-          if (channel.has_relay) {
-            toggle_channel(channel, "touch_toggle");
-          } else {
-            handle_aux_touch(channel);
-          }
-        } else {
-          telemetry_dirty = true;
-          queue_state("touch_release", channel.key);
-        }
+    const bool raw = read_touch_active(channel.touch_pin);
+    if (raw != channel.last_touch_raw) {
+      channel.last_touch_raw = raw;
+      channel.last_touch_raw_change_ms = now;
+    }
+
+    if (raw == channel.touch_active) {
+      continue;
+    }
+
+    const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
+    if ((now - channel.last_touch_raw_change_ms) < debounce_ms) {
+      continue;
+    }
+
+    channel.touch_active = raw;
+    apply_channel_output(channel);
+    if (!channel.touch_active) {
+      channel.touch_armed = true;
+      telemetry_dirty = true;
+      queue_state("touch_release", channel.key);
+      continue;
+    }
+
+    if (channel.touch_armed && (now - channel.last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+      channel.touch_armed = false;
+      channel.last_touch_toggle_ms = now;
+      if (channel.has_relay) {
+        toggle_channel(channel, "touch_toggle");
+      } else {
+        handle_aux_touch(channel);
       }
     }
   }
@@ -578,8 +598,11 @@ void init_gpio() {
     }
     pinMode(channel.led_pin, OUTPUT);
     pinMode(channel.touch_pin, INPUT);
-    channel.last_touch_active = read_touch_active(channel.touch_pin);
-    channel.last_touch_change_ms = millis();
+    channel.last_touch_raw = read_touch_active(channel.touch_pin);
+    channel.touch_active = channel.last_touch_raw;
+    channel.last_touch_raw_change_ms = millis();
+    channel.last_touch_toggle_ms = 0;
+    channel.touch_armed = !channel.touch_active;
     apply_channel_output(channel);
   }
 }
@@ -626,6 +649,6 @@ void loop() {
         mqtt_client.connected() ? "up" : "down",
         channels[0].relay_on ? "on" : "off",
         channels[1].relay_on ? "on" : "off",
-        read_touch_active(channels[2].touch_pin) ? "on" : "off");
+        channels[2].touch_active ? "on" : "off");
   }
 }

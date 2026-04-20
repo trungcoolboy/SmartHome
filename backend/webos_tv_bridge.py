@@ -83,7 +83,13 @@ class TvState:
     volume: int | None = None
     muted: bool | None = None
     foreground_app_id: str | None = None
+    foreground_app_title: str | None = None
+    foreground_app_started_at: float | None = None
     inputs: list[dict[str, Any]] = field(default_factory=list)
+    launch_points: list[dict[str, Any]] = field(default_factory=list)
+    apps: list[dict[str, Any]] = field(default_factory=list)
+    apps_last_seen: float | None = None
+    apps_last_error: str | None = None
     last_error: str | None = None
     wake_pending: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -104,7 +110,18 @@ class TvState:
                 "volume": self.volume,
                 "muted": self.muted,
                 "foregroundAppId": self.foreground_app_id,
+                "foregroundAppTitle": self.foreground_app_title,
+                "foregroundAppStartedAt": self.foreground_app_started_at,
+                "foregroundAppDurationSeconds": (
+                    round(max(0.0, time.time() - self.foreground_app_started_at), 3)
+                    if self.foreground_app_started_at is not None
+                    else None
+                ),
                 "inputs": self.inputs,
+                "launchPoints": self.launch_points,
+                "apps": self.apps,
+                "appsLastSeen": self.apps_last_seen,
+                "appsLastError": self.apps_last_error,
                 "lastError": self.last_error,
                 "wakePending": self.wake_pending,
                 "uptimeSeconds": round(time.time() - self.boot_time, 3),
@@ -290,20 +307,54 @@ class WebOsTvBridge:
             app_payload = self._request("ssap://com.webos.applicationManager/getForegroundAppInfo")
             inputs_payload = self._request("ssap://tv/getExternalInputList")
 
+        app_id = app_payload.get("appId")
+        now = time.time()
         with self.state.lock:
             self.state.reachable = True
             self.state.paired = True
             self.state.pairing_pending = False
             self.state.wake_pending = False
-            self.state.last_seen = time.time()
+            self.state.last_seen = now
             self.state.volume = volume_payload.get("volume")
             self.state.muted = volume_payload.get("muted")
-            self.state.foreground_app_id = app_payload.get("appId")
+            if app_id != self.state.foreground_app_id:
+                self.state.foreground_app_started_at = now if app_id else None
+            self.state.foreground_app_id = app_id
             self.state.inputs = inputs_payload.get("devices", [])
+            self.state.foreground_app_title = self._resolve_app_title(app_id)
             self.state.last_error = None
-            self.last_refresh_at = time.time()
+            self.last_refresh_at = now
 
         return self.state.snapshot()
+
+    def list_apps(self) -> dict[str, Any]:
+        if not self.client_key:
+            raise RuntimeError("TV is not paired yet")
+        with self.io_lock:
+            launch_payload = self._request("ssap://com.webos.applicationManager/listLaunchPoints")
+            apps_payload = self._request("ssap://com.webos.applicationManager/listApps")
+
+        launch_points = self._normalize_launch_points(launch_payload.get("launchPoints", []))
+        apps = self._normalize_apps(apps_payload.get("apps", []))
+        now = time.time()
+        with self.state.lock:
+            self.state.reachable = True
+            self.state.paired = True
+            self.state.pairing_pending = False
+            self.state.wake_pending = False
+            self.state.last_seen = now
+            self.state.launch_points = launch_points
+            self.state.apps = apps
+            self.state.foreground_app_title = self._resolve_app_title(self.state.foreground_app_id)
+            self.state.apps_last_seen = now
+            self.state.apps_last_error = None
+            self.state.last_error = None
+        return {
+            "launchPoints": launch_points,
+            "apps": apps,
+            "appsLastSeen": now,
+            "state": self.state.snapshot(),
+        }
 
     def send_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         command = str(payload.get("command", ""))
@@ -426,20 +477,7 @@ class WebOsTvBridge:
                             "payload": {
                                 "client-key": self.client_key,
                                 "pairingType": "PROMPT",
-                                "manifest": {
-                                    "manifestVersion": 1,
-                                    "appVersion": "1.0",
-                                    "signed": {
-                                        "created": "20260411",
-                                        "appId": self.app_id,
-                                        "vendorId": self.vendor_id,
-                                        "localizedAppNames": {"": "Smart Home Dashboard"},
-                                        "localizedVendorNames": {"": "Smart Home"},
-                                        "permissions": REGISTER_PERMISSIONS,
-                                        "serial": "202604110001",
-                                    },
-                                    "permissions": REGISTER_PERMISSIONS,
-                                },
+                                "manifest": self._manifest(),
                             },
                         }
                     )
@@ -454,7 +492,14 @@ class WebOsTvBridge:
                             continue
                         body = response.get("payload", {})
                         if not body.get("returnValue", False):
-                            raise RuntimeError(body.get("errorText", "TV command failed"))
+                            detail = (
+                                body.get("errorText")
+                                or body.get("errorCode")
+                                or body.get("error")
+                                or response.get("error")
+                                or "TV command failed"
+                            )
+                            raise RuntimeError(str(detail))
                         return body
             except Exception as exc:
                 last_error = str(exc)
@@ -462,6 +507,61 @@ class WebOsTvBridge:
         with self.state.lock:
             self.state.last_error = last_error
         raise RuntimeError(last_error)
+
+    def _normalize_launch_points(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    "id": item.get("id"),
+                    "launchPointId": item.get("launchPointId"),
+                    "title": item.get("title"),
+                    "appDescription": item.get("appDescription"),
+                    "icon": item.get("icon"),
+                    "bgImage": item.get("bgImage"),
+                    "visible": item.get("visible"),
+                    "systemApp": item.get("systemApp"),
+                    "largeIcon": item.get("largeIcon"),
+                }
+            )
+        normalized.sort(key=lambda item: str(item.get("title") or item.get("id") or "").lower())
+        return normalized
+
+    def _normalize_apps(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    "id": item.get("id"),
+                    "title": item.get("title"),
+                    "icon": item.get("icon"),
+                    "version": item.get("version"),
+                    "visible": item.get("visible"),
+                    "systemApp": item.get("systemApp"),
+                    "removable": item.get("removable"),
+                    "vendor": item.get("vendor"),
+                }
+            )
+        normalized.sort(key=lambda item: str(item.get("title") or item.get("id") or "").lower())
+        return normalized
+
+    def _resolve_app_title(self, app_id: str | None) -> str | None:
+        if not app_id:
+            return None
+        for item in self.state.launch_points:
+            if item.get("id") == app_id:
+                return item.get("title") or app_id
+        for item in self.state.apps:
+            if item.get("id") == app_id:
+                return item.get("title") or app_id
+        for item in self.state.inputs:
+            if item.get("appId") == app_id:
+                return item.get("label") or app_id
+        return app_id
 
     def _send_remote_button(self, button: str) -> dict[str, Any]:
         pointer_payload = self._request("ssap://com.webos.service.networkinput/getPointerInputSocket")

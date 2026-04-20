@@ -32,6 +32,7 @@ extern "C" {
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "a_axis_motion.h"
 #include "byj1_motion.h"
 #include "byj2_motion.h"
 /* USER CODE END Includes */
@@ -54,7 +55,14 @@ extern "C" {
 /* Exported functions prototypes ---------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
+extern TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim2;
+extern TIM_HandleTypeDef htim3;
+extern TIM_HandleTypeDef htim4;
 extern TIM_HandleTypeDef htim6;
+extern TIM_HandleTypeDef htim8;
+extern TIM_HandleTypeDef htim16;
+extern TIM_HandleTypeDef htim17;
 
 void Error_Handler(void);
 
@@ -78,8 +86,8 @@ void Error_Handler(void);
 #define B_DIR_GPIO_Port GPIOC
 #define A_MIN_ENDSTOP_Pin GPIO_PIN_9
 #define A_MIN_ENDSTOP_GPIO_Port GPIOA
-#define A_MAX_ENDSTOP_Pin GPIO_PIN_10
-#define A_MAX_ENDSTOP_GPIO_Port GPIOA
+#define A_MAX_ENDSTOP_Pin GPIO_PIN_0
+#define A_MAX_ENDSTOP_GPIO_Port GPIOC
 #define B_MIN_ENDSTOP_Pin GPIO_PIN_4
 #define B_MIN_ENDSTOP_GPIO_Port GPIOB
 #define B_MAX_ENDSTOP_Pin GPIO_PIN_5
@@ -98,7 +106,7 @@ void Error_Handler(void);
 #define PAN1_SERVO_GPIO_Port GPIOB
 #define PAN2_SERVO_Pin GPIO_PIN_1
 #define PAN2_SERVO_GPIO_Port GPIOA
-#define LID_SERVO_Pin GPIO_PIN_4
+#define LID_SERVO_Pin GPIO_PIN_10
 #define LID_SERVO_GPIO_Port GPIOA
 
 #define INTEL_FAN1_PWM_Pin GPIO_PIN_6
@@ -109,11 +117,6 @@ void Error_Handler(void);
 #define INTEL_FAN1_TACH_GPIO_Port GPIOC
 #define INTEL_FAN2_TACH_Pin GPIO_PIN_7
 #define INTEL_FAN2_TACH_GPIO_Port GPIOB
-
-#define OLED_SCL_Pin GPIO_PIN_8
-#define OLED_SCL_GPIO_Port GPIOB
-#define OLED_SDA_Pin GPIO_PIN_9
-#define OLED_SDA_GPIO_Port GPIOB
 
 #define BYJ1_STEP_Pin GPIO_PIN_12
 #define BYJ1_STEP_GPIO_Port GPIOB

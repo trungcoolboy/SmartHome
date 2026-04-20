@@ -1,9 +1,21 @@
 import React, { useEffect, useRef, useState } from "react";
 import { getApiBaseUrl } from "../api";
+import ABWorkspaceMap from "./ABWorkspaceMap";
+import youtubeIcon from "../assets/tv-apps/youtube.svg";
+import spotifyIcon from "../assets/tv-apps/spotify.svg";
+import browserIcon from "../assets/tv-apps/browser.svg";
+import fptPlayIcon from "../assets/tv-apps/fptplay.ico";
+import vieonIcon from "../assets/tv-apps/vieon.ico";
+import vtvGoIcon from "../assets/tv-apps/vtvgo.ico";
 
 function ModulePage({ page, alertFeed }) {
   const [deviceState, setDeviceState] = useState(null);
   const [deviceError, setDeviceError] = useState("");
+  const [deviceAppsError, setDeviceAppsError] = useState("");
+  const [deviceAppHistory, setDeviceAppHistory] = useState([]);
+  const [deviceAppHistoryError, setDeviceAppHistoryError] = useState("");
+  const [deviceAppHistoryNameFilter, setDeviceAppHistoryNameFilter] = useState("");
+  const [deviceAppHistoryDateFilter, setDeviceAppHistoryDateFilter] = useState("");
   const [pendingPowerCommand, setPendingPowerCommand] = useState("");
   const [showVolumeHud, setShowVolumeHud] = useState(false);
   const [volumeHudValue, setVolumeHudValue] = useState(0);
@@ -15,6 +27,26 @@ function ModulePage({ page, alertFeed }) {
   const [bAxisDecelWindowSteps, setBAxisDecelWindowSteps] = useState("");
   const [bAxisGotoPosition, setBAxisGotoPosition] = useState("");
   const [bAxisCommandPending, setBAxisCommandPending] = useState(false);
+  const [servoStates, setServoStates] = useState({});
+  const [byjStates, setByjStates] = useState({});
+  const [servoAngleInputs, setServoAngleInputs] = useState({
+    fan1: "90",
+    fan2: "90",
+    pan1: "90",
+    pan2: "90",
+    lid: "90",
+  });
+  const [byj1TargetMmInput, setByj1TargetMmInput] = useState("0");
+  const [byj2StepInput, setByj2StepInput] = useState("5000");
+  const [byj2Direction, setByj2Direction] = useState("+");
+  const [selectedABTarget, setSelectedABTarget] = useState(null);
+  const [selectedATargetMmInput, setSelectedATargetMmInput] = useState("");
+  const [selectedBTargetMmInput, setSelectedBTargetMmInput] = useState("");
+  const [motionState, setMotionState] = useState({
+    a: null,
+    b: null,
+    ab: null,
+  });
   const [roomNodeState, setRoomNodeState] = useState(null);
   const [roomNodeError, setRoomNodeError] = useState("");
   const [roomNodeSecondaryState, setRoomNodeSecondaryState] = useState(null);
@@ -22,6 +54,8 @@ function ModulePage({ page, alertFeed }) {
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
+  const [activeModuleTab, setActiveModuleTab] = useState("");
+  const [activeRoomDeviceTab, setActiveRoomDeviceTab] = useState("");
   const reconnectTimerRef = useRef(null);
   const statusTimerRef = useRef(null);
   const syncTimerRef = useRef(null);
@@ -43,9 +77,66 @@ function ModulePage({ page, alertFeed }) {
   const roomNodeSecondaryCardRef = useRef(null);
   const sectionRefs = useRef({});
 
+  function clampNumber(value, min, max) {
+    if (!Number.isFinite(value)) {
+      return value;
+    }
+    return Math.max(min, Math.min(max, value));
+  }
+
   function clampVolume(value) {
     return Math.max(0, Math.min(100, Math.round(value)));
   }
+
+  function formatDateTime(valueSeconds) {
+    if (!Number.isFinite(valueSeconds)) {
+      return "Unknown";
+    }
+    return new Date(valueSeconds * 1000).toLocaleString();
+  }
+
+  function formatDurationMinutes(valueSeconds) {
+    if (!Number.isFinite(valueSeconds)) {
+      return "0.0";
+    }
+    return (valueSeconds / 60).toFixed(1);
+  }
+
+  function formatDateForFilter(valueSeconds) {
+    if (!Number.isFinite(valueSeconds)) {
+      return "";
+    }
+    const date = new Date(valueSeconds * 1000);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function formatFriendlyError(message, fallback) {
+    if (!message) {
+      return fallback;
+    }
+    const normalized = String(message).toLowerCase();
+    if (
+      normalized.includes("no route to host")
+      || normalized.includes("failed to fetch")
+      || normalized.includes("networkerror")
+      || normalized.includes("network error")
+    ) {
+      return fallback;
+    }
+    return message;
+  }
+
+  const servoDefinitions = [
+    { key: "fan1", label: "Fan 1", min: 0, max: 100 },
+    { key: "fan2", label: "Fan 2", min: 70, max: 175 },
+    { key: "pan1", label: "Pan 1", min: 0, max: 180 },
+    { key: "pan2", label: "Pan 2", min: 50, max: 140 },
+    { key: "lid", label: "Lid", min: 0, max: 180 },
+  ];
+  const byj1MmPerStep = 42 / 50000;
 
   function reconcileIncomingDeviceState(nextState) {
     if (!nextState) {
@@ -173,6 +264,294 @@ function ModulePage({ page, alertFeed }) {
     return null;
   }
 
+  function parseServoLine(line) {
+    if (!line || typeof line !== "string") {
+      return null;
+    }
+
+    const servoMatch = line.match(/^servo\s+([a-z0-9_]+)\s+us\s+(\d+)\s+angle\s+(\d+)/i);
+    if (!servoMatch) {
+      return null;
+    }
+
+    return {
+      key: servoMatch[1].toLowerCase(),
+      pulseUs: Number.parseInt(servoMatch[2], 10),
+      angle: Number.parseInt(servoMatch[3], 10),
+    };
+  }
+
+  function parseByjLine(line) {
+    if (!line || typeof line !== "string") {
+      return null;
+    }
+
+    const byjMatch = line.match(
+      /^byj\s+(byj[12])\s+enabled\s+(on|off)\s+moving\s+(on|off)\s+pos\s+(-?\d+)\s+target\s+(-?\d+)\s+vel\s+(-?\d+)\s+endstop\s+(trig|clear)(?:\s+mm\s+(-?\d+(?:\.\d+)?))?/i,
+    );
+    if (!byjMatch) {
+      return null;
+    }
+
+    return {
+      key: byjMatch[1].toLowerCase(),
+      enabled: byjMatch[2].toLowerCase() === "on",
+      moving: byjMatch[3].toLowerCase() === "on",
+      pos: Number.parseInt(byjMatch[4], 10),
+      target: Number.parseInt(byjMatch[5], 10),
+      vel: Number.parseInt(byjMatch[6], 10),
+      endstop: byjMatch[7].toLowerCase(),
+      mm: byjMatch[8] != null ? Number.parseFloat(byjMatch[8]) : null,
+    };
+  }
+
+  function parseMotionLine(line) {
+    if (!line || typeof line !== "string") {
+      return null;
+    }
+
+    if (/STM32G431RB #02 boot/i.test(line)) {
+      return {
+        kind: "boot_reset",
+      };
+    }
+
+    const axisMatch = line.match(
+      /^axis\s+([ab])\s+enabled\s+(on|off)\s+moving\s+(on|off)\s+pos\s+(-?\d+)\s+target\s+(-?\d+)\s+vel\s+(-?\d+)\s+homed\s+(yes|no).*?\stravel\s+(\d+)/i,
+    );
+    if (axisMatch) {
+      return {
+        kind: "axis",
+        axis: axisMatch[1].toLowerCase(),
+        enabled: axisMatch[2].toLowerCase() === "on",
+        moving: axisMatch[3].toLowerCase() === "on",
+        pos: Number.parseInt(axisMatch[4], 10),
+        target: Number.parseInt(axisMatch[5], 10),
+        vel: Number.parseInt(axisMatch[6], 10),
+        homed: axisMatch[7].toLowerCase() === "yes",
+        travel: Number.parseInt(axisMatch[8], 10),
+      };
+    }
+
+    const abMatch = line.match(
+      /^ab\s+active\s+(on|off)\s+pos_a\s+(-?\d+)\s+target_a\s+(-?\d+)\s+pos_b\s+(-?\d+)\s+target_b\s+(-?\d+)\s+steps_done\s+(\d+)\s+steps_total\s+(\d+)\s+interval_us\s+(\d+)\s+cruise_us\s+(\d+)\s+start_us\s+(\d+)/i,
+    );
+    if (abMatch) {
+      return {
+        kind: "ab",
+        active: abMatch[1].toLowerCase() === "on",
+        posA: Number.parseInt(abMatch[2], 10),
+        targetA: Number.parseInt(abMatch[3], 10),
+        posB: Number.parseInt(abMatch[4], 10),
+        targetB: Number.parseInt(abMatch[5], 10),
+        stepsDone: Number.parseInt(abMatch[6], 10),
+        stepsTotal: Number.parseInt(abMatch[7], 10),
+        intervalUs: Number.parseInt(abMatch[8], 10),
+        cruiseUs: Number.parseInt(abMatch[9], 10),
+        startUs: Number.parseInt(abMatch[10], 10),
+      };
+    }
+
+    const homeMatch = line.match(/^ok axis\s+([ab])\s+homed\s+release_steps\s+(\d+)/i);
+    if (homeMatch) {
+      return {
+        kind: "home_ok",
+        axis: homeMatch[1].toLowerCase(),
+        releaseSteps: Number.parseInt(homeMatch[2], 10),
+      };
+    }
+
+    const scanMatch = line.match(/^ok axis\s+([ab])\s+scan\s+travel_steps\s+(\d+)/i);
+    if (scanMatch) {
+      return {
+        kind: "scan_ok",
+        axis: scanMatch[1].toLowerCase(),
+        travel: Number.parseInt(scanMatch[2], 10),
+      };
+    }
+
+    const stopMatch = line.match(/^ok axis\s+([ab])\s+stop$/i);
+    if (stopMatch) {
+      return {
+        kind: "stop_ok",
+        axis: stopMatch[1].toLowerCase(),
+      };
+    }
+
+    const axisMotionMatch = line.match(/^axis\s+([ab])\s+enabled\s+(on|off)\s+moving\s+(on|off).*homing\s+([a-z_]+)/i);
+    if (axisMotionMatch) {
+      return {
+        kind: "axis_motion",
+        axis: axisMotionMatch[1].toLowerCase(),
+        moving: axisMotionMatch[3].toLowerCase() === "on",
+        homingState: axisMotionMatch[4].toLowerCase(),
+      };
+    }
+
+    return null;
+  }
+
+  function applyMotionLinesToState(lines) {
+    if (!lines?.length) {
+      return;
+    }
+
+    setMotionState((current) => {
+      let next = current;
+
+      lines.forEach((line) => {
+        const parsed = parseMotionLine(line);
+        if (!parsed) {
+          return;
+        }
+
+        if (next === current) {
+          next = { ...current };
+        }
+
+        if (parsed.kind === "boot_reset") {
+          next = {
+            a: null,
+            b: null,
+            ab: null,
+          };
+          return;
+        }
+
+        if (parsed.kind === "axis") {
+          next[parsed.axis] = parsed;
+          return;
+        }
+
+        if (parsed.kind === "ab") {
+          next.ab = parsed;
+          if (!parsed.active) {
+            if (next.a ?? current.a) {
+              next.a = { ...(next.a ?? current.a), moving: false };
+            }
+            if (next.b ?? current.b) {
+              next.b = { ...(next.b ?? current.b), moving: false };
+            }
+          }
+          return;
+        }
+
+        if (parsed.kind === "home_ok") {
+          const existingAxis = next[parsed.axis] ?? current[parsed.axis] ?? {};
+          next[parsed.axis] = {
+            ...existingAxis,
+            enabled: true,
+            moving: false,
+            homed: true,
+            pos: 0,
+            target: 0,
+            vel: 0,
+          };
+          next.ab = {
+            active: false,
+            posA: next.a?.pos ?? current.a?.pos ?? 0,
+            targetA: next.a?.target ?? current.a?.target ?? 0,
+            posB: next.b?.pos ?? current.b?.pos ?? 0,
+            targetB: next.b?.target ?? current.b?.target ?? 0,
+            stepsDone: 0,
+            stepsTotal: 0,
+            intervalUs: 0,
+            cruiseUs: 0,
+            startUs: 0,
+          };
+          return;
+        }
+
+        if (parsed.kind === "scan_ok") {
+          const existingAxis = next[parsed.axis] ?? current[parsed.axis] ?? {};
+          next[parsed.axis] = {
+            ...existingAxis,
+            enabled: true,
+            moving: false,
+            homed: true,
+            pos: 0,
+            target: 0,
+            vel: 0,
+            travel: parsed.travel,
+          };
+          next.ab = {
+            active: false,
+            posA: next.a?.pos ?? current.a?.pos ?? 0,
+            targetA: next.a?.target ?? current.a?.target ?? 0,
+            posB: next.b?.pos ?? current.b?.pos ?? 0,
+            targetB: next.b?.target ?? current.b?.target ?? 0,
+            stepsDone: 0,
+            stepsTotal: 0,
+            intervalUs: 0,
+            cruiseUs: 0,
+            startUs: 0,
+          };
+          return;
+        }
+
+        if (parsed.kind === "stop_ok") {
+          const existingAxis = next[parsed.axis] ?? current[parsed.axis] ?? {};
+          next[parsed.axis] = {
+            ...existingAxis,
+            moving: false,
+            vel: 0,
+          };
+          next.ab = {
+            active: false,
+            posA: next.a?.pos ?? current.a?.pos ?? 0,
+            targetA: next.a?.target ?? current.a?.target ?? 0,
+            posB: next.b?.pos ?? current.b?.pos ?? 0,
+            targetB: next.b?.target ?? current.b?.target ?? 0,
+            stepsDone: 0,
+            stepsTotal: 0,
+            intervalUs: 0,
+            cruiseUs: 0,
+            startUs: 0,
+          };
+          return;
+        }
+
+        if (parsed.kind === "axis_motion") {
+          const existingAxis = next[parsed.axis] ?? current[parsed.axis] ?? {};
+          next[parsed.axis] = {
+            ...existingAxis,
+            moving: parsed.moving,
+          };
+          if (parsed.moving || parsed.homingState !== "idle") {
+            next.ab = {
+              active: false,
+              posA: next.a?.pos ?? current.a?.pos ?? 0,
+              targetA: next.a?.target ?? current.a?.target ?? 0,
+              posB: next.b?.pos ?? current.b?.pos ?? 0,
+              targetB: next.b?.target ?? current.b?.target ?? 0,
+              stepsDone: 0,
+              stepsTotal: 0,
+              intervalUs: 0,
+              cruiseUs: 0,
+              startUs: 0,
+            };
+            return;
+          }
+          next.ab = {
+            active: false,
+            posA: next.a?.pos ?? current.a?.pos ?? 0,
+            targetA: next.a?.target ?? current.a?.target ?? 0,
+            posB: next.b?.pos ?? current.b?.pos ?? 0,
+            targetB: next.b?.target ?? current.b?.target ?? 0,
+            stepsDone: 0,
+            stepsTotal: 0,
+            intervalUs: 0,
+            cruiseUs: 0,
+            startUs: 0,
+          };
+          return;
+        }
+      });
+
+      return next;
+    });
+  }
+
   function applyBridgeLinesToControls(lines) {
     if (!lines?.length) {
       return;
@@ -187,8 +566,23 @@ function ModulePage({ page, alertFeed }) {
     const nextPumps = {};
     const nextMisc = {};
     const nextSensors = {};
+    const nextServos = {};
+    const nextByj = {};
 
     lines.forEach((line) => {
+      const servoParsed = parseServoLine(line);
+      if (servoParsed) {
+        nextServos[servoParsed.key] = {
+          pulseUs: servoParsed.pulseUs,
+          angle: servoParsed.angle,
+        };
+      }
+
+      const byjParsed = parseByjLine(line);
+      if (byjParsed) {
+        nextByj[byjParsed.key] = byjParsed;
+      }
+
       const parsed = parseBridgeLine(line);
       if (!parsed) {
         return;
@@ -221,6 +615,12 @@ function ModulePage({ page, alertFeed }) {
     }
     if (Object.keys(nextSensors).length) {
       setSensorStates((current) => ({ ...current, ...nextSensors }));
+    }
+    if (Object.keys(nextServos).length) {
+      setServoStates((current) => ({ ...current, ...nextServos }));
+    }
+    if (Object.keys(nextByj).length) {
+      setByjStates((current) => ({ ...current, ...nextByj }));
     }
   }
 
@@ -352,10 +752,53 @@ function ModulePage({ page, alertFeed }) {
   }, [page]);
 
   useEffect(() => {
+    if (!Object.keys(servoStates).length) {
+      return;
+    }
+
+    setServoAngleInputs((current) => {
+      const next = { ...current };
+      let changed = false;
+
+      Object.entries(servoStates).forEach(([key, state]) => {
+        if (!state || !Number.isFinite(state.angle)) {
+          return;
+        }
+        const nextValue = String(state.angle);
+        if (next[key] !== nextValue) {
+          next[key] = nextValue;
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+  }, [servoStates]);
+
+  useEffect(() => {
+    if (page.featuredDevice || !page.deviceStrip?.length) {
+      setActiveModuleTab("");
+      return;
+    }
+    setActiveModuleTab(page.deviceStrip[0].id);
+  }, [page]);
+
+  useEffect(() => {
+    if (!page.featuredDevice) {
+      setActiveRoomDeviceTab("");
+      return;
+    }
+    setActiveRoomDeviceTab("featured");
+  }, [page]);
+
+  useEffect(() => {
     if (!page.featuredDevice?.apiPath) {
       clearScheduledWork();
       setDeviceState(null);
       setDeviceError("");
+      setDeviceAppsError("");
+      setDeviceAppHistory([]);
+      setDeviceAppHistoryError("");
       setPendingPowerCommand("");
       return;
     }
@@ -418,9 +861,12 @@ function ModulePage({ page, alertFeed }) {
     }
 
     loadStatus();
+    refreshFeaturedApps();
+    refreshFeaturedAppHistory();
     connectEvents();
     statusTimerRef.current = window.setInterval(() => {
       loadStatus({ preserveError: true });
+      refreshFeaturedAppHistory();
     }, 15000);
 
     return () => {
@@ -463,11 +909,37 @@ function ModulePage({ page, alertFeed }) {
       setBAxisTravelSteps("");
       setBAxisDecelWindowSteps("");
       setBAxisGotoPosition("");
+      setMotionState({ a: null, b: null, ab: null });
       return;
     }
     setBAxisTravelSteps(String(tuning.defaultTravelSteps ?? ""));
     setBAxisDecelWindowSteps(String(tuning.defaultDecelWindowSteps ?? ""));
     setBAxisGotoPosition("");
+    setMotionState({
+      a: tuning.defaultATravelSteps
+        ? {
+            enabled: false,
+            moving: false,
+            pos: 0,
+            target: 0,
+            vel: 0,
+            homed: false,
+            travel: tuning.defaultATravelSteps,
+          }
+        : null,
+      b: tuning.defaultTravelSteps
+        ? {
+            enabled: false,
+            moving: false,
+            pos: 0,
+            target: 0,
+            vel: 0,
+            homed: false,
+            travel: tuning.defaultTravelSteps,
+          }
+        : null,
+      ab: null,
+    });
   }, [page.bridge?.bAxisTuning]);
 
   useEffect(() => {
@@ -493,6 +965,7 @@ function ModulePage({ page, alertFeed }) {
           const items = payload.items ?? [];
           setBridgeLogs(items.slice(-6));
           applyBridgeLinesToControls(items.map((item) => item.payload));
+          applyMotionLinesToState(items.map((item) => item.payload));
         }
       } catch (error) {
         if (!cancelled) {
@@ -512,6 +985,7 @@ function ModulePage({ page, alertFeed }) {
         if (!cancelled) {
           setBridgeState(payload);
           applyBridgeSnapshotToControls(payload);
+          applyMotionLinesToState([payload.lastLine].filter(Boolean));
           if (!preserveError) {
             setBridgeError("");
           }
@@ -538,11 +1012,13 @@ function ModulePage({ page, alertFeed }) {
           if (payload.type === "snapshot" && payload.state) {
             setBridgeState(payload.state);
             applyBridgeSnapshotToControls(payload.state);
+            applyMotionLinesToState([payload.state.lastLine].filter(Boolean));
             setBridgeError("");
           }
           if ((payload.type === "rx" || payload.type === "tx") && payload.payload) {
             if (payload.type === "rx") {
               applyBridgeLinesToControls([payload.payload]);
+              applyMotionLinesToState([payload.payload]);
             }
             setBridgeLogs((current) => {
               const next = [
@@ -582,7 +1058,7 @@ function ModulePage({ page, alertFeed }) {
     bridgeStatusTimerRef.current = window.setInterval(() => {
       loadBridgeStatus({ preserveError: true });
       loadBridgeLogs();
-    }, 15000);
+    }, 1000);
 
     return () => {
       cancelled = true;
@@ -794,10 +1270,10 @@ function ModulePage({ page, alertFeed }) {
       : "LAN / reachable"
     : page.featuredDevice?.facts?.[2]?.value;
   const liveDetailText = deviceError
-    ? `Bridge error: ${deviceError}`
+    ? formatFriendlyError(deviceError, "TV is offline or not reachable right now.")
     : deviceState?.wakePending
       ? "Wake-on-LAN sent. Waiting for TV network stack and webOS session to come back."
-    : deviceState?.lastSeen
+      : deviceState?.lastSeen
       ? `Last sync ${new Date(deviceState.lastSeen * 1000).toLocaleTimeString()}${deviceState.stale ? " (stale)" : ""}`
       : page.featuredDevice?.nowPlaying?.detail;
   const liveSubtitleText = deviceState?.reachable
@@ -812,6 +1288,50 @@ function ModulePage({ page, alertFeed }) {
         .filter((item) => item.appId)
         .map((item) => ({ label: item.label, appId: item.appId }))
     : (page.featuredDevice?.apps ?? []).map((item) => ({ label: item, appId: "" }));
+  const preferredLaunchAppIds = [
+    "youtube.leanback.v4",
+    "com.fpt.fptplay",
+    "spotify-beehive",
+    "com.webos.app.browser",
+    "vieplay.vn",
+    "com.vtvgotv.app",
+  ];
+  const preferredLaunchAppIconMap = {
+    "youtube.leanback.v4": youtubeIcon,
+    "com.fpt.fptplay": fptPlayIcon,
+    "spotify-beehive": spotifyIcon,
+    "com.webos.app.browser": browserIcon,
+    "vieplay.vn": vieonIcon,
+    "com.vtvgotv.app": vtvGoIcon,
+  };
+  const liveLaunchPoints = Array.isArray(deviceState?.launchPoints) ? deviceState.launchPoints : [];
+  const preferredLaunchApps = preferredLaunchAppIds
+    .map((appId) => liveLaunchPoints.find((item) => item?.id === appId))
+    .filter(Boolean);
+  const featuredLaunchApps = preferredLaunchApps.length
+    ? preferredLaunchApps
+    : liveLaunchPoints.filter((item) => item?.id && item?.icon).slice(0, 6);
+  const hasLiveForegroundApp = Boolean(deviceState?.reachable && !deviceState?.stale && deviceState?.foregroundAppId);
+  const currentForegroundAppTitle = hasLiveForegroundApp
+    ? (deviceState?.foregroundAppTitle ?? deviceState?.foregroundAppId ?? "Unknown")
+    : "Offline";
+  const currentForegroundAppStartedAt = hasLiveForegroundApp ? (deviceState?.foregroundAppStartedAt ?? null) : null;
+  const currentForegroundAppDurationSeconds = hasLiveForegroundApp ? (deviceState?.foregroundAppDurationSeconds ?? null) : null;
+  const filteredDeviceAppHistory = deviceAppHistory.filter((item) => {
+    const payload = item.payloadJson ?? {};
+    const appName = String(payload.title ?? payload.appId ?? "").toLowerCase();
+    const nameFilter = deviceAppHistoryNameFilter.trim().toLowerCase();
+    if (nameFilter && !appName.includes(nameFilter)) {
+      return false;
+    }
+    if (deviceAppHistoryDateFilter) {
+      const startedDate = formatDateForFilter(payload.startedAt);
+      if (startedDate !== deviceAppHistoryDateFilter) {
+        return false;
+      }
+    }
+    return true;
+  });
   const liveBridgeConnectivity = bridgeState
     ? bridgeState.connected
       ? "Serial link active"
@@ -833,7 +1353,41 @@ function ModulePage({ page, alertFeed }) {
         ? "MQTT error"
         : "Offline"
     : "Waiting for node";
-
+  const aTravelSteps = (motionState.a?.travel && motionState.a.travel > 0)
+    ? motionState.a.travel
+    : (page.bridge?.bAxisTuning?.defaultATravelSteps ?? 0);
+  const bTravelSteps = (motionState.b?.travel && motionState.b.travel > 0)
+    ? motionState.b.travel
+    : (page.bridge?.bAxisTuning?.defaultTravelSteps ?? 0);
+  const aMmPerStep = page.bridge?.bAxisTuning?.aMmPerStep ?? 1;
+  const bMmPerStep = page.bridge?.bAxisTuning?.bMmPerStep ?? 1;
+  const aTravelMm = aTravelSteps * aMmPerStep;
+  const bTravelMm = bTravelSteps * bMmPerStep;
+  const byj1State = byjStates.byj1 ?? null;
+  const byj2State = byjStates.byj2 ?? null;
+  const byj1CurrentMm = Number.isFinite(byj1State?.mm) ? byj1State.mm : ((byj1State?.pos ?? 0) * byj1MmPerStep);
+  const byj1TargetMm = (byj1State?.target ?? 0) * byj1MmPerStep;
+  const hasAquariumTabs = Boolean(page.bridge?.bAxisTuning && page.deviceStrip?.length > 1);
+  const showControlTab = !hasAquariumTabs || activeModuleTab === "control";
+  const showWorkspaceTab = hasAquariumTabs && activeModuleTab === "workspace";
+  const showFeaturedDeviceTab = !page.featuredDevice || activeRoomDeviceTab === "featured";
+  const showRoomNodeTab = !page.featuredDevice || activeRoomDeviceTab === "room-node";
+  const showRoomNodeSecondaryTab = !page.featuredDevice || activeRoomDeviceTab === "room-node-secondary";
+  const currentAMm = (motionState.ab?.posA ?? motionState.a?.pos ?? 0) * aMmPerStep;
+  const currentBMm = (motionState.ab?.posB ?? motionState.b?.pos ?? 0) * bMmPerStep;
+  const liveTargetAMm = (motionState.ab?.targetA ?? motionState.a?.target ?? 0) * aMmPerStep;
+  const liveTargetBMm = (motionState.ab?.targetB ?? motionState.b?.target ?? 0) * bMmPerStep;
+  const anyAxisMoving = Boolean(motionState.a?.moving || motionState.b?.moving || motionState.ab?.active);
+  const effectiveTargetA = selectedABTarget?.aTargetMm ?? liveTargetAMm;
+  const effectiveTargetB = selectedABTarget?.bTargetMm ?? liveTargetBMm;
+  const currentAMarker = aTravelMm > 0 ? Math.max(0, Math.min(100, (currentAMm / aTravelMm) * 100)) : 0;
+  const currentBMarker = bTravelMm > 0 ? Math.max(0, Math.min(100, (currentBMm / bTravelMm) * 100)) : 0;
+  const targetAMarker = aTravelMm > 0 ? Math.max(0, Math.min(100, (effectiveTargetA / aTravelMm) * 100)) : 0;
+  const targetBMarker = bTravelMm > 0 ? Math.max(0, Math.min(100, (effectiveTargetB / bTravelMm) * 100)) : 0;
+  const selectedAMarker = aTravelMm > 0 && selectedABTarget ? Math.max(0, Math.min(100, (selectedABTarget.aTargetMm / aTravelMm) * 100)) : null;
+  const selectedBMarker = bTravelMm > 0 && selectedABTarget ? Math.max(0, Math.min(100, (selectedABTarget.bTargetMm / bTravelMm) * 100)) : null;
+  const parsedSelectedATargetMm = Number.parseFloat(selectedATargetMmInput);
+  const parsedSelectedBTargetMm = Number.parseFloat(selectedBTargetMmInput);
   function renderRemoteUtilityIcon(action) {
     if (action === "Power") {
       return (
@@ -1068,6 +1622,50 @@ function ModulePage({ page, alertFeed }) {
     }
   }
 
+  async function refreshFeaturedApps() {
+    if (!page.featuredDevice?.apiPath) {
+      return;
+    }
+    const baseUrl = getFeaturedBaseUrl();
+    try {
+      const response = await fetch(`${baseUrl}/apps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `status ${response.status}`);
+      }
+      if (payload.state) {
+        setDeviceState(reconcileIncomingDeviceState(payload.state));
+      } else {
+        setDeviceState((current) => ({ ...(current ?? {}), ...payload }));
+      }
+      setDeviceAppsError("");
+    } catch (error) {
+      setDeviceAppsError(error.message);
+    }
+  }
+
+  async function refreshFeaturedAppHistory() {
+    if (!page.featuredDevice?.apiPath) {
+      return;
+    }
+    const baseUrl = getFeaturedBaseUrl();
+    try {
+      const response = await fetch(`${baseUrl}/app-history?limit=100`);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `status ${response.status}`);
+      }
+      setDeviceAppHistory(payload.items ?? []);
+      setDeviceAppHistoryError("");
+    } catch (error) {
+      setDeviceAppHistoryError(error.message);
+    }
+  }
+
   async function refreshBridgeStatus() {
     if (!page.bridge?.apiPath) {
       return;
@@ -1168,6 +1766,146 @@ function ModulePage({ page, alertFeed }) {
 
   async function scanBAxisTravel() {
     await sendBridgeTextCommand("axis b scan");
+  }
+
+  async function homeAAxis() {
+    await sendBridgeTextCommand("axis a home");
+  }
+
+  async function scanAAxisTravel() {
+    await sendBridgeTextCommand("axis a scan");
+  }
+
+  async function sendABGoto(aTarget, bTarget) {
+    await sendBridgeTextCommand(`ab goto ${aTarget} ${bTarget}`);
+  }
+
+  function parseABTargetFromInputs() {
+    const aTargetMm = Number.parseFloat(selectedATargetMmInput);
+    const bTargetMm = Number.parseFloat(selectedBTargetMmInput);
+
+    if (!Number.isFinite(aTargetMm) || !Number.isFinite(bTargetMm)) {
+      setBridgeError("enter valid A/B targets in mm");
+      return null;
+    }
+    if (!motionState.a?.homed || !motionState.b?.homed) {
+      setBridgeError("home A and B before sending an AB target");
+      return null;
+    }
+    if (aTargetMm < 0 || bTargetMm < 0 || aTargetMm > aTravelMm || bTargetMm > bTravelMm) {
+      setBridgeError("target mm is outside scanned travel");
+      return null;
+    }
+
+    return {
+      aTargetMm,
+      bTargetMm,
+      aTargetSteps: Math.round(aTargetMm / aMmPerStep),
+      bTargetSteps: Math.round(bTargetMm / bMmPerStep),
+    };
+  }
+
+  async function applySelectedABTarget() {
+    const target = parseABTargetFromInputs();
+    if (!target) {
+      return;
+    }
+    await sendABGoto(target.aTargetSteps, target.bTargetSteps);
+  }
+
+  async function sendABNowFromInputs() {
+    const target = parseABTargetFromInputs();
+    if (!target) {
+      return;
+    }
+    await sendABGoto(target.aTargetSteps, target.bTargetSteps);
+  }
+
+  async function stopABMotion() {
+    await runBridgeCommandSequence(["ab stop", "axis a stop", "axis b stop"], 120);
+  }
+
+  async function refreshServoStatus() {
+    await sendBridgeTextCommand("servo status");
+  }
+
+  async function applyServoAngleCommand(servoKey, angleValue) {
+    const angle = Number.parseInt(String(angleValue ?? ""), 10);
+    if (!servoKey) {
+      setBridgeError("select a servo first");
+      return;
+    }
+    if (!Number.isFinite(angle) || angle < 0 || angle > 180) {
+      setBridgeError("servo angle must be 0..180");
+      return;
+    }
+    await sendBridgeTextCommand(`servo ${servoKey} angle ${angle}`);
+    setServoStates((current) => ({
+      ...current,
+      [servoKey]: {
+        ...(current[servoKey] ?? {}),
+        angle,
+        pulseUs: Math.round(500 + (angle * 2000) / 180),
+      },
+    }));
+  }
+
+  async function refreshByjStatus() {
+    await sendBridgeTextCommand("byj status");
+  }
+
+  async function homeByj1() {
+    await sendBridgeTextCommand("byj byj1 enable on");
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+    await sendBridgeTextCommand("byj byj1 home");
+  }
+
+  async function applyByj1GotoMm() {
+    const targetMm = Number.parseFloat(byj1TargetMmInput);
+    if (!Number.isFinite(targetMm) || targetMm < 0) {
+      setBridgeError("BYJ1 target mm must be >= 0");
+      return;
+    }
+
+    const targetSteps = Math.round(targetMm / byj1MmPerStep);
+    await sendBridgeTextCommand(`byj byj1 goto ${targetSteps}`);
+  }
+
+  async function runByj2Move() {
+    const steps = Number.parseInt(byj2StepInput, 10);
+    if (!Number.isFinite(steps) || steps <= 0) {
+      setBridgeError("BYJ2 step must be > 0");
+      return;
+    }
+
+    const signedSteps = byj2Direction === "-" ? -steps : steps;
+    await runBridgeCommandSequence(["byj byj2 enable on", `byj byj2 move ${signedSteps}`], 120);
+  }
+
+  async function pauseByj2() {
+    await sendBridgeTextCommand("byj byj2 stop");
+  }
+
+  async function jogByj2(direction) {
+    await runBridgeCommandSequence(["byj byj2 enable on", `byj byj2 jog ${direction}`], 120);
+  }
+
+  function updateServoAngleInput(servoKey, nextValue) {
+    setServoAngleInputs((current) => ({
+      ...current,
+      [servoKey]: nextValue,
+    }));
+  }
+
+  function selectABTarget(target) {
+    const aTargetMm = target?.aTargetMm;
+    const bTargetMm = target?.bTargetMm;
+    if (!Number.isFinite(aTargetMm) || !Number.isFinite(bTargetMm)) {
+      return;
+    }
+    setSelectedABTarget({ aTargetMm, bTargetMm });
+    setSelectedATargetMmInput(String(aTargetMm));
+    setSelectedBTargetMmInput(String(bTargetMm));
   }
 
   function focusFeaturedDevice() {
@@ -1446,39 +2184,41 @@ function ModulePage({ page, alertFeed }) {
         </section>
       )}
 
-      {page.featuredDevice ? (
+      {page.featuredDevice || page.roomNode || page.roomNodeSecondary ? (
         <section className="room-device-strip" aria-label="Room devices">
-          <button
-            className="room-device-icon active"
-            type="button"
-            aria-label={page.featuredDevice.name}
-            title={page.featuredDevice.name}
-            onClick={focusFeaturedDevice}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3" y="5" width="18" height="12" rx="2.5" />
-              <path d="M9 20h6" />
-              <path d="M12 17v3" />
-            </svg>
-          </button>
+          {page.featuredDevice ? (
+            <button
+              className={`room-device-icon ${showFeaturedDeviceTab ? "active" : ""}`}
+              type="button"
+              aria-label={page.featuredDevice.name}
+              title={page.featuredDevice.name}
+              onClick={() => setActiveRoomDeviceTab("featured")}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="12" rx="2.5" />
+                <path d="M9 20h6" />
+                <path d="M12 17v3" />
+              </svg>
+            </button>
+          ) : null}
           {page.roomNode ? (
             <button
-              className="room-device-icon active"
+              className={`room-device-icon ${showRoomNodeTab ? "active" : ""}`}
               type="button"
               aria-label={page.roomNode.title}
               title={page.roomNode.title}
-              onClick={focusRoomNode}
+              onClick={() => setActiveRoomDeviceTab("room-node")}
             >
               {renderStripIcon("node")}
             </button>
           ) : null}
           {page.roomNodeSecondary ? (
             <button
-              className="room-device-icon active"
+              className={`room-device-icon ${showRoomNodeSecondaryTab ? "active" : ""}`}
               type="button"
               aria-label={page.roomNodeSecondary.title}
               title={page.roomNodeSecondary.title}
-              onClick={focusRoomNodeSecondary}
+              onClick={() => setActiveRoomDeviceTab("room-node-secondary")}
             >
               {renderStripIcon("node")}
             </button>
@@ -1491,11 +2231,17 @@ function ModulePage({ page, alertFeed }) {
           {page.deviceStrip.map((item) => (
             <button
               key={item.id}
-              className="room-device-icon active"
+              className={`room-device-icon ${activeModuleTab === item.id ? "active" : ""}`}
               type="button"
               aria-label={item.label}
               title={item.label}
-              onClick={() => focusPageSection(item.id)}
+              onClick={() => {
+                if (hasAquariumTabs) {
+                  setActiveModuleTab(item.id);
+                  return;
+                }
+                focusPageSection(item.id);
+              }}
             >
               {renderStripIcon(item.icon)}
             </button>
@@ -1503,7 +2249,7 @@ function ModulePage({ page, alertFeed }) {
         </section>
       ) : null}
 
-      {page.highlights?.length ? (
+      {page.highlights?.length && showControlTab ? (
         <section className="module-grid">
           {page.highlights.map((group) => (
             <article
@@ -1663,170 +2409,246 @@ function ModulePage({ page, alertFeed }) {
 
       {page.featuredDevice ? (
         <>
-          <section ref={featuredDeviceCardRef} className="featured-device-card">
-            <div className="featured-device-copy">
-              <h3>{page.featuredDevice.name}</h3>
-            </div>
+          {showFeaturedDeviceTab ? (
+            <>
+              <section ref={featuredDeviceCardRef} className="featured-device-card">
+                <div className="featured-device-copy">
+                  <h3>{page.featuredDevice.name}</h3>
+                </div>
 
-            <div className="featured-device-actions">
-              <div className="featured-actions-left">
-                <div className="featured-actions-spacer" />
-              </div>
-
-              <div className="tv-control-card inline-remote-card">
-                <span className="eyebrow">Remote Pad</span>
-                <div className="remote-shell">
-                  <div className="magic-remote-utility-grid">
-                    {[
-                      {
-                        label: canPowerOn ? "Turn TV on" : "Turn TV off",
-                        className: `power-icon-button ${canPowerOn ? "power-off" : "power-on"} ${
-                          pendingPowerCommand === "turn_on"
-                            ? "pending-on"
-                            : pendingPowerCommand === "turn_off"
-                              ? "pending-off"
-                              : ""
-                        }`,
-                        command: { command: canPowerOn ? "turn_on" : "turn_off" },
-                        icon: renderRemoteUtilityIcon("Power"),
-                      },
-                      {
-                        label: "Mute",
-                        className: "remote-key remote-key-icon",
-                        command: { command: "toggle_mute" },
-                        icon: renderRemoteUtilityIcon("Mute"),
-                      },
-                      {
-                        label: "Source",
-                        className: "remote-key remote-key-icon",
-                        command: { command: "show_input_picker" },
-                        icon: renderRemoteUtilityIcon("Source"),
-                      },
-                      {
-                        label: "Settings",
-                        className: "remote-key remote-key-icon",
-                        command: { command: "remote_button", button: "MENU" },
-                        icon: renderRemoteUtilityIcon("Settings"),
-                      },
-                      {
-                        label: "Home",
-                        className: "remote-key remote-key-icon",
-                        command: { command: "remote_button", button: "HOME" },
-                        icon: renderRemoteUtilityIcon("Home"),
-                      },
-                      {
-                        label: "Back",
-                        className: "remote-key remote-key-icon",
-                        command: { command: "remote_button", button: "BACK" },
-                        icon: renderRemoteUtilityIcon("Back"),
-                      },
-                      { label: "Vol -", className: "remote-key remote-key-pill", command: { command: "volume_down" } },
-                      { label: "Vol +", className: "remote-key remote-key-pill", command: { command: "volume_up" } },
-                    ].map((item) => (
-                      <button
-                        key={item.label}
-                        className={item.className}
-                        type="button"
-                        aria-label={item.label}
-                        title={item.label}
-                        onClick={() => sendFeaturedCommand(item.command)}
-                      >
-                        {item.icon ?? item.label}
-                      </button>
-                    ))}
+                <div className="featured-device-actions">
+                  <div className="featured-actions-left">
+                    <article className="tv-control-card featured-status-card">
+                      <span className="eyebrow">Status</span>
+                      <div className="tv-status-grid">
+                        <div className="tv-status-item">
+                          <span>Running App</span>
+                          <strong>{currentForegroundAppTitle}</strong>
+                        </div>
+                        <div className="tv-status-item">
+                          <span>Started At</span>
+                          <strong>{formatDateTime(currentForegroundAppStartedAt)}</strong>
+                        </div>
+                        <div className="tv-status-item">
+                          <span>Run Time</span>
+                          <strong>{formatDurationMinutes(currentForegroundAppDurationSeconds)} min</strong>
+                        </div>
+                      </div>
+                    </article>
                   </div>
 
-                  <div className="remote-dpad">
-                    {["Up", "Left", "OK", "Right", "Down"].map((action) => (
-                      <button
-                        key={action}
-                        className={`remote-key remote-key-${action.toLowerCase()}`}
-                        type="button"
-                        onClick={() => {
-                          const buttonMap = {
-                            OK: "ENTER",
-                            "CH+": "CHANNELUP",
-                            "CH-": "CHANNELDOWN",
-                          };
-                          sendFeaturedCommand({
-                            command: "remote_button",
-                            button: buttonMap[action] || action,
-                          });
-                        }}
-                      >
-                        {action}
-                      </button>
-                    ))}
-                  </div>
+                  <div className="tv-control-card inline-remote-card">
+                    <span className="eyebrow">Remote Pad</span>
+                    <div className="remote-shell">
+                      <div className="magic-remote-utility-grid">
+                        {[
+                          {
+                            label: canPowerOn ? "Turn TV on" : "Turn TV off",
+                            className: `power-icon-button ${canPowerOn ? "power-off" : "power-on"} ${
+                              pendingPowerCommand === "turn_on"
+                                ? "pending-on"
+                                : pendingPowerCommand === "turn_off"
+                                  ? "pending-off"
+                                  : ""
+                            }`,
+                            command: { command: canPowerOn ? "turn_on" : "turn_off" },
+                            icon: renderRemoteUtilityIcon("Power"),
+                          },
+                          {
+                            label: "Mute",
+                            className: "remote-key remote-key-icon",
+                            command: { command: "toggle_mute" },
+                            icon: renderRemoteUtilityIcon("Mute"),
+                          },
+                          {
+                            label: "Source",
+                            className: "remote-key remote-key-icon",
+                            command: { command: "show_input_picker" },
+                            icon: renderRemoteUtilityIcon("Source"),
+                          },
+                          {
+                            label: "Settings",
+                            className: "remote-key remote-key-icon",
+                            command: { command: "remote_button", button: "MENU" },
+                            icon: renderRemoteUtilityIcon("Settings"),
+                          },
+                          {
+                            label: "Home",
+                            className: "remote-key remote-key-icon",
+                            command: { command: "remote_button", button: "HOME" },
+                            icon: renderRemoteUtilityIcon("Home"),
+                          },
+                          {
+                            label: "Back",
+                            className: "remote-key remote-key-icon",
+                            command: { command: "remote_button", button: "BACK" },
+                            icon: renderRemoteUtilityIcon("Back"),
+                          },
+                          { label: "Vol -", className: "remote-key remote-key-pill", command: { command: "volume_down" } },
+                          { label: "Vol +", className: "remote-key remote-key-pill", command: { command: "volume_up" } },
+                        ].map((item) => (
+                          <button
+                            key={item.label}
+                            className={item.className}
+                            type="button"
+                            aria-label={item.label}
+                            title={item.label}
+                            onClick={() => sendFeaturedCommand(item.command)}
+                          >
+                            {item.icon ?? item.label}
+                          </button>
+                        ))}
+                      </div>
 
-                  <div className="remote-channel-row">
-                    {[
-                      { label: "CH-", button: "CHANNELDOWN" },
-                      { label: "CH+", button: "CHANNELUP" },
-                    ].map((item) => (
-                      <button
-                        key={item.label}
-                        className="remote-key remote-key-wide"
-                        type="button"
-                        onClick={() =>
-                          sendFeaturedCommand({
-                            command: "remote_button",
-                            button: item.button,
-                          })
-                        }
+                      <div className="remote-dpad">
+                        {["Up", "Left", "OK", "Right", "Down"].map((action) => (
+                          <button
+                            key={action}
+                            className={`remote-key remote-key-${action.toLowerCase()}`}
+                            type="button"
+                            onClick={() => {
+                              const buttonMap = {
+                                OK: "ENTER",
+                                "CH+": "CHANNELUP",
+                                "CH-": "CHANNELDOWN",
+                              };
+                              sendFeaturedCommand({
+                                command: "remote_button",
+                                button: buttonMap[action] || action,
+                              });
+                            }}
+                          >
+                            {action}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="remote-channel-row">
+                        {[
+                          { label: "CH-", button: "CHANNELDOWN" },
+                          { label: "CH+", button: "CHANNELUP" },
+                        ].map((item) => (
+                          <button
+                            key={item.label}
+                            className="remote-key remote-key-wide"
+                            type="button"
+                            onClick={() =>
+                              sendFeaturedCommand({
+                                command: "remote_button",
+                                button: item.button,
+                              })
+                            }
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className={`volume-hud outside ${showVolumeHud ? "visible" : ""}`} aria-hidden={!showVolumeHud}>
+                      <div
+                        ref={volumeHudTrackRef}
+                        className={`volume-hud-track ${volumeHudDragging ? "dragging" : ""}`}
+                        role="slider"
+                        aria-label="TV volume"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={clampVolume(volumeHudValue)}
+                        tabIndex={0}
+                        onPointerDown={handleVolumePointerDown}
+                        onPointerMove={handleVolumePointerMove}
+                        onPointerUp={finishVolumePointerInteraction}
+                        onPointerCancel={finishVolumePointerInteraction}
                       >
-                        {item.label}
-                      </button>
-                    ))}
+                        <div
+                          className="volume-hud-fill"
+                          style={{ height: `${clampVolume(volumeHudValue)}%` }}
+                        />
+                      </div>
+                      <span>{clampVolume(volumeHudValue)}</span>
+                    </div>
                   </div>
                 </div>
-                <div className={`volume-hud outside ${showVolumeHud ? "visible" : ""}`} aria-hidden={!showVolumeHud}>
-                  <div
-                    ref={volumeHudTrackRef}
-                    className={`volume-hud-track ${volumeHudDragging ? "dragging" : ""}`}
-                    role="slider"
-                    aria-label="TV volume"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={clampVolume(volumeHudValue)}
-                    tabIndex={0}
-                    onPointerDown={handleVolumePointerDown}
-                    onPointerMove={handleVolumePointerMove}
-                    onPointerUp={finishVolumePointerInteraction}
-                    onPointerCancel={finishVolumePointerInteraction}
-                  >
-                    <div
-                      className="volume-hud-fill"
-                      style={{ height: `${clampVolume(volumeHudValue)}%` }}
+              </section>
+
+              <section className="tv-control-grid">
+                <article className="tv-control-card">
+                  <span className="eyebrow">Quick Apps</span>
+                  <div className="tv-app-grid">
+                    {featuredLaunchApps.map((app) => (
+                      <button
+                        key={app.id}
+                        className="tv-app-button"
+                        type="button"
+                        title={app.title}
+                        onClick={() => sendFeaturedCommand({ command: "launch_app", appId: app.id })}
+                      >
+                        {preferredLaunchAppIconMap[app.id] || app.icon ? (
+                          <img
+                            className="tv-app-icon"
+                            src={preferredLaunchAppIconMap[app.id] || app.icon}
+                            alt=""
+                            loading="lazy"
+                          />
+                        ) : (
+                          <span className="tv-app-fallback">{String(app.title || app.id || "?").slice(0, 1)}</span>
+                        )}
+                        <span className="tv-app-label">{app.title ?? app.id}</span>
+                      </button>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="tv-control-card">
+                  <span className="eyebrow">App History</span>
+                  {deviceAppHistoryError ? <p>{deviceAppHistoryError}</p> : null}
+                  <div className="tv-app-history-filters">
+                    <input
+                      type="text"
+                      value={deviceAppHistoryNameFilter}
+                      placeholder="Filter by app name"
+                      onChange={(event) => setDeviceAppHistoryNameFilter(event.target.value)}
+                    />
+                    <input
+                      type="date"
+                      value={deviceAppHistoryDateFilter}
+                      onChange={(event) => setDeviceAppHistoryDateFilter(event.target.value)}
                     />
                   </div>
-                  <span>{clampVolume(volumeHudValue)}</span>
-                </div>
-              </div>
-            </div>
-          </section>
+                  <div className="tv-app-history-table-wrap">
+                    <table className="tv-app-history-table">
+                      <thead>
+                        <tr>
+                          <th>No.</th>
+                          <th>App</th>
+                          <th>Start</th>
+                          <th>End</th>
+                          <th>Duration</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredDeviceAppHistory.map((item, index) => {
+                          const payload = item.payloadJson ?? {};
+                          return (
+                            <tr key={item.id}>
+                              <td>{index + 1}</td>
+                              <td>{payload.title ?? payload.appId ?? "Unknown"}</td>
+                              <td>{formatDateTime(payload.startedAt)}</td>
+                              <td>{formatDateTime(payload.endedAt)}</td>
+                              <td>{formatDurationMinutes(payload.durationSeconds)} min</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </article>
+              </section>
+            </>
+          ) : null}
 
-          <section className="tv-control-grid">
-            <article className="tv-control-card">
-              <span className="eyebrow">Apps & Sources</span>
-              <div className="chip-grid">
-                {liveInputItems.map((app) => (
-                  <button
-                    key={`${app.label}-${app.appId || "mock"}`}
-                    className="source-chip"
-                    type="button"
-                    onClick={() => {
-                      if (app.appId) {
-                        sendFeaturedCommand({ command: "set_input", appId: app.appId });
-                      }
-                    }}
-                  >
-                    {app.label}
-                  </button>
-                ))}
-              </div>
-            </article>
-            {page.roomNode ? (
+          {(showRoomNodeTab || showRoomNodeSecondaryTab) && (page.roomNode || page.roomNodeSecondary) ? (
+            <section className="tv-control-grid">
+            {page.roomNode && showRoomNodeTab ? (
               <article ref={roomNodeCardRef} className="tv-control-card">
                 <span className="eyebrow">{page.roomNode.title}</span>
                 <strong>{liveRoomNodeConnectivity}</strong>
@@ -1842,7 +2664,8 @@ function ModulePage({ page, alertFeed }) {
                 <div className="next-step-grid">
                   {(page.roomNode.relays ?? []).map((relay) => {
                     const relayOn = Boolean(roomNodeState?.relays?.[relay.key]);
-                    const relayLedMode = roomNodeState?.ledModes?.[relay.key] ?? "unknown";
+                    const relayLedMode =
+                      roomNodeState?.ledModes?.[relay.key] ?? roomNodeState?.ledMode ?? "unknown";
                     return (
                       <div key={relay.key} className="next-step-card">
                         <span>{relay.label}</span>
@@ -1876,7 +2699,9 @@ function ModulePage({ page, alertFeed }) {
                                 onClick={() =>
                                   sendRoomNodeCommand({
                                     action: "set_led_mode",
-                                    channel: relay.key,
+                                    ...(page.roomNode.ledModeScopedByRelay === false
+                                      ? {}
+                                      : { channel: relay.key }),
                                     mode: mode.key,
                                   })
                                 }
@@ -1898,7 +2723,7 @@ function ModulePage({ page, alertFeed }) {
                 </div>
               </article>
             ) : null}
-            {page.roomNodeSecondary ? (
+            {page.roomNodeSecondary && showRoomNodeSecondaryTab ? (
               <article ref={roomNodeSecondaryCardRef} className="tv-control-card">
                 <span className="eyebrow">{page.roomNodeSecondary.title}</span>
                 <strong>{liveRoomNodeSecondaryConnectivity}</strong>
@@ -1911,32 +2736,64 @@ function ModulePage({ page, alertFeed }) {
                         ? `IP ${roomNodeSecondaryState.ip} / RSSI ${roomNodeSecondaryState.wifiRssi ?? "n/a"}`
                         : "Waiting for node state"}
                 </p>
-                <div className="room-node-led-mode">
-                  <div className="room-node-led-mode-head">
-                    <span>LED Mode</span>
-                    <strong>{roomNodeSecondaryState?.ledMode ?? "unknown"}</strong>
+                {(page.roomNodeSecondary.ledModes ?? []).length > 0 ? (
+                  <div className="room-node-led-mode">
+                    <div className="room-node-led-mode-head">
+                      <span>LED Mode</span>
+                      <strong>{roomNodeSecondaryState?.ledMode ?? "unknown"}</strong>
+                    </div>
+                    <div className="chip-grid">
+                      {(page.roomNodeSecondary.ledModes ?? []).map((mode) => (
+                        <button
+                          key={mode.key}
+                          className={`source-chip ${
+                            roomNodeSecondaryState?.ledMode === mode.key ? "active" : ""
+                          }`}
+                          type="button"
+                          onClick={() =>
+                            sendRoomNodeSecondaryCommand({
+                              action: "set_led_mode",
+                              mode: mode.key,
+                            })
+                          }
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="chip-grid">
-                    {(page.roomNodeSecondary.ledModes ?? []).map((mode) => (
-                      <button
-                        key={mode.key}
-                        className={`source-chip ${
-                          roomNodeSecondaryState?.ledMode === mode.key ? "active" : ""
-                        }`}
-                        type="button"
-                        onClick={() =>
-                          sendRoomNodeSecondaryCommand({
-                            action: "set_led_mode",
-                            mode: mode.key,
-                          })
-                        }
-                      >
-                        {mode.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                ) : null}
                 <div className="next-step-grid">
+                  {page.roomNodeSecondary.remoteRelayLabel ? (
+                    <div className="next-step-card">
+                      <span>{page.roomNodeSecondary.remoteRelayLabel}</span>
+                      <strong>{roomNodeSecondaryState?.remoteRelay ? "On" : "Off"}</strong>
+                      <div className="chip-grid">
+                        {page.roomNodeSecondary.remoteRelayToggleAction ? (
+                          <button
+                            className="source-chip"
+                            type="button"
+                            onClick={() =>
+                              sendRoomNodeSecondaryCommand(page.roomNodeSecondary.remoteRelayToggleAction)
+                            }
+                          >
+                            Toggle
+                          </button>
+                        ) : null}
+                        {page.roomNodeSecondary.remoteRelaySyncAction ? (
+                          <button
+                            className="source-chip"
+                            type="button"
+                            onClick={() =>
+                              sendRoomNodeSecondaryCommand(page.roomNodeSecondary.remoteRelaySyncAction)
+                            }
+                          >
+                            Sync
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
                   {(page.roomNodeSecondary.relays ?? []).map((relay) => {
                     const relayOn = Boolean(roomNodeSecondaryState?.relays?.[relay.key]);
                     return (
@@ -1969,8 +2826,192 @@ function ModulePage({ page, alertFeed }) {
                 </div>
               </article>
             ) : null}
-          </section>
+            </section>
+          ) : null}
         </>
+      ) : null}
+
+      {!page.featuredDevice && (page.roomNode || page.roomNodeSecondary) ? (
+        <section className="tv-control-grid">
+          {page.roomNode ? (
+            <article ref={roomNodeCardRef} className="tv-control-card">
+              <span className="eyebrow">{page.roomNode.title}</span>
+              <strong>{liveRoomNodeConnectivity}</strong>
+              <p>
+                {roomNodeError
+                  ? `Node error: ${roomNodeError}`
+                  : roomNodeState?.lastError
+                    ? roomNodeState.lastError
+                    : roomNodeState?.ip
+                      ? `IP ${roomNodeState.ip} / RSSI ${roomNodeState.wifiRssi ?? "n/a"}`
+                      : "Waiting for node state"}
+              </p>
+              <div className="next-step-grid">
+                {(page.roomNode.relays ?? []).map((relay) => {
+                  const relayOn = Boolean(roomNodeState?.relays?.[relay.key]);
+                  const relayLedMode =
+                    roomNodeState?.ledModes?.[relay.key] ?? roomNodeState?.ledMode ?? "unknown";
+                  return (
+                    <div key={relay.key} className="next-step-card">
+                      <span>{relay.label}</span>
+                      <strong>{relayOn ? "On" : "Off"}</strong>
+                      <div className="chip-grid">
+                        <button
+                          className="source-chip"
+                          type="button"
+                          onClick={() =>
+                            sendRoomNodeCommand({
+                              action: "set_relay",
+                              channel: relay.key,
+                              value: !relayOn,
+                            })
+                          }
+                        >
+                          {relayOn ? "Turn Off" : "Turn On"}
+                        </button>
+                      </div>
+                      <div className="room-node-led-mode room-node-led-mode-compact">
+                        <div className="room-node-led-mode-head">
+                          <span>LED Mode</span>
+                          <strong>{relayLedMode}</strong>
+                        </div>
+                        <div className="chip-grid">
+                          {(page.roomNode.ledModes ?? []).map((mode) => (
+                            <button
+                              key={`${relay.key}-${mode.key}`}
+                              className={`source-chip ${relayLedMode === mode.key ? "active" : ""}`}
+                              type="button"
+                              onClick={() =>
+                                sendRoomNodeCommand({
+                                  action: "set_led_mode",
+                                  ...(page.roomNode.ledModeScopedByRelay === false
+                                    ? {}
+                                    : { channel: relay.key }),
+                                  mode: mode.key,
+                                })
+                              }
+                            >
+                              {mode.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {(page.roomNode.touches ?? []).map((touch) => (
+                  <div key={touch.key} className="next-step-card">
+                    <span>{touch.label}</span>
+                    <strong>{roomNodeState?.touches?.[touch.key] ? "Touched" : "Idle"}</strong>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+          {page.roomNodeSecondary ? (
+            <article ref={roomNodeSecondaryCardRef} className="tv-control-card">
+              <span className="eyebrow">{page.roomNodeSecondary.title}</span>
+              <strong>{liveRoomNodeSecondaryConnectivity}</strong>
+              <p>
+                {roomNodeSecondaryError
+                  ? `Node error: ${roomNodeSecondaryError}`
+                  : roomNodeSecondaryState?.lastError
+                    ? roomNodeSecondaryState.lastError
+                    : roomNodeSecondaryState?.ip
+                      ? `IP ${roomNodeSecondaryState.ip} / RSSI ${roomNodeSecondaryState.wifiRssi ?? "n/a"}`
+                      : "Waiting for node state"}
+              </p>
+              {(page.roomNodeSecondary.ledModes ?? []).length > 0 ? (
+                <div className="room-node-led-mode">
+                  <div className="room-node-led-mode-head">
+                    <span>LED Mode</span>
+                    <strong>{roomNodeSecondaryState?.ledMode ?? "unknown"}</strong>
+                  </div>
+                  <div className="chip-grid">
+                    {(page.roomNodeSecondary.ledModes ?? []).map((mode) => (
+                      <button
+                        key={mode.key}
+                        className={`source-chip ${
+                          roomNodeSecondaryState?.ledMode === mode.key ? "active" : ""
+                        }`}
+                        type="button"
+                        onClick={() =>
+                          sendRoomNodeSecondaryCommand({
+                            action: "set_led_mode",
+                            mode: mode.key,
+                          })
+                        }
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <div className="next-step-grid">
+                {page.roomNodeSecondary.remoteRelayLabel ? (
+                  <div className="next-step-card">
+                    <span>{page.roomNodeSecondary.remoteRelayLabel}</span>
+                    <strong>{roomNodeSecondaryState?.remoteRelay ? "On" : "Off"}</strong>
+                    <div className="chip-grid">
+                      {page.roomNodeSecondary.remoteRelayToggleAction ? (
+                        <button
+                          className="source-chip"
+                          type="button"
+                          onClick={() =>
+                            sendRoomNodeSecondaryCommand(page.roomNodeSecondary.remoteRelayToggleAction)
+                          }
+                        >
+                          Toggle
+                        </button>
+                      ) : null}
+                      {page.roomNodeSecondary.remoteRelaySyncAction ? (
+                        <button
+                          className="source-chip"
+                          type="button"
+                          onClick={() =>
+                            sendRoomNodeSecondaryCommand(page.roomNodeSecondary.remoteRelaySyncAction)
+                          }
+                        >
+                          Sync
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+                {(page.roomNodeSecondary.relays ?? []).map((relay) => {
+                  const relayOn = Boolean(roomNodeSecondaryState?.relays?.[relay.key]);
+                  return (
+                    <div key={relay.key} className="next-step-card">
+                      <span>{relay.label}</span>
+                      <strong>{relayOn ? "On" : "Off"}</strong>
+                      <div className="chip-grid">
+                        <button
+                          className="source-chip"
+                          type="button"
+                          onClick={() =>
+                            sendRoomNodeSecondaryCommand({
+                              action: "set_relay",
+                              value: !relayOn,
+                            })
+                          }
+                        >
+                          {relayOn ? "Turn Off" : "Turn On"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {(page.roomNodeSecondary.touches ?? []).map((touch) => (
+                  <div key={touch.key} className="next-step-card">
+                    <span>{touch.label}</span>
+                    <strong>{roomNodeSecondaryState?.touches?.[touch.key] ? "Touched" : "Idle"}</strong>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+        </section>
       ) : null}
 
       {page.pinoutsCard ? (
@@ -2002,7 +3043,7 @@ function ModulePage({ page, alertFeed }) {
         </section>
       ) : null}
 
-      {page.bridge ? (
+      {page.bridge && showControlTab ? (
         <section className="featured-device-card">
           <div className="featured-device-copy">
             <span className="eyebrow">{page.bridge.eyebrow}</span>
@@ -2047,32 +3088,6 @@ function ModulePage({ page, alertFeed }) {
               <button className="ghost-pill" type="button" onClick={refreshBridgeStatus}>
                 Refresh Bridge
               </button>
-            </div>
-
-            <div className="volume-card">
-              <span>Telemetry</span>
-              <strong>{bridgeState?.lastLine ?? "No line yet"}</strong>
-              <p>
-                {bridgeState?.aliveCounter != null
-                  ? `Alive counter ${bridgeState.aliveCounter}`
-                  : "No alive counter reported"}
-              </p>
-              <div className="next-step-grid">
-                <div className="next-step-card">
-                  <span>Bytes Rx</span>
-                  <strong>{bridgeState?.bytesReceived ?? 0}</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>Bytes Tx</span>
-                  <strong>{bridgeState?.bytesSent ?? 0}</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>Uptime</span>
-                  <strong>
-                    {bridgeState?.uptimeSeconds != null ? `${Math.round(bridgeState.uptimeSeconds)}s` : "n/a"}
-                  </strong>
-                </div>
-              </div>
             </div>
 
             {page.bridge?.bAxisTuning ? (
@@ -2131,38 +3146,392 @@ function ModulePage({ page, alertFeed }) {
                 </div>
               </div>
             ) : null}
+
+            <div className="volume-card servo-control-card">
+              <span>Servo Control</span>
+              <strong>STM32 #02 Servo</strong>
+              <div className="featured-action-group b-axis-tune-actions">
+                <button className="ghost-pill" type="button" onClick={refreshServoStatus} disabled={bAxisCommandPending}>
+                  Refresh All
+                </button>
+              </div>
+              <div className="servo-dashboard-grid">
+                {servoDefinitions.map((servo) => {
+                  const currentServoState = servoStates[servo.key];
+                  const currentAngle = currentServoState?.angle;
+                  const currentPulseUs = currentServoState?.pulseUs;
+                  const presets = [servo.min, 90, servo.max].filter(
+                    (angle, index, values) => angle >= servo.min && angle <= servo.max && values.indexOf(angle) === index,
+                  );
+
+                  return (
+                    <article key={servo.key} className="next-step-card servo-dashboard-card">
+                      <div className="servo-dashboard-head">
+                        <div>
+                          <span>{servo.label}</span>
+                          <strong>{Number.isFinite(currentAngle) ? `${currentAngle}°` : "Unknown"}</strong>
+                        </div>
+                        <p>{Number.isFinite(currentPulseUs) ? `${currentPulseUs} us` : "No status"}</p>
+                      </div>
+
+                      <div className="servo-dashboard-body">
+                        <label className="b-axis-tune-field servo-dashboard-field">
+                          <span>Angle</span>
+                          <input
+                            type="number"
+                            min={servo.min}
+                            max={servo.max}
+                            step="1"
+                            value={servoAngleInputs[servo.key] ?? ""}
+                            onChange={(event) => updateServoAngleInput(servo.key, event.target.value)}
+                            disabled={bAxisCommandPending}
+                          />
+                        </label>
+
+                        <button
+                          className="ghost-pill servo-dashboard-apply"
+                          type="button"
+                          onClick={() => applyServoAngleCommand(servo.key, servoAngleInputs[servo.key])}
+                          disabled={bAxisCommandPending}
+                        >
+                          Apply
+                        </button>
+                      </div>
+
+                      <div className="servo-dashboard-presets">
+                        {presets.map((angle) => (
+                          <button
+                            key={`${servo.key}-${angle}`}
+                            className="ghost-pill"
+                            type="button"
+                            onClick={() => {
+                              updateServoAngleInput(servo.key, String(angle));
+                              applyServoAngleCommand(servo.key, angle);
+                            }}
+                            disabled={bAxisCommandPending}
+                          >
+                            {angle}°
+                          </button>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="volume-card servo-control-card">
+              <span>BYJ1 Control</span>
+              <strong>Home and absolute move in mm</strong>
+              <div className="servo-dashboard-grid">
+                <article className="next-step-card servo-dashboard-card">
+                  <div className="servo-dashboard-head">
+                    <div>
+                      <span>BYJ1 State</span>
+                      <strong>{byj1State?.moving ? "Moving" : "Idle"}</strong>
+                    </div>
+                    <p>{byj1State?.endstop === "trig" ? "Endstop trig" : "Endstop clear"}</p>
+                  </div>
+
+                  <div className="byj-status-grid">
+                    <div className="next-step-card">
+                      <span>Position</span>
+                      <strong>{byj1CurrentMm.toFixed(3)} mm</strong>
+                    </div>
+                    <div className="next-step-card">
+                      <span>Target</span>
+                      <strong>{byj1TargetMm.toFixed(3)} mm</strong>
+                    </div>
+                    <div className="next-step-card">
+                      <span>Steps</span>
+                      <strong>{byj1State?.pos ?? 0}</strong>
+                    </div>
+                    <div className="next-step-card">
+                      <span>Scale</span>
+                      <strong>42 mm / 50000 step</strong>
+                    </div>
+                  </div>
+
+                  <div className="servo-dashboard-body">
+                    <label className="b-axis-tune-field servo-dashboard-field">
+                      <span>Target mm</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={byj1TargetMmInput}
+                        onChange={(event) => setByj1TargetMmInput(event.target.value)}
+                        disabled={bAxisCommandPending}
+                      />
+                    </label>
+
+                    <button
+                      className="ghost-pill servo-dashboard-apply"
+                      type="button"
+                      onClick={applyByj1GotoMm}
+                      disabled={bAxisCommandPending}
+                    >
+                      Apply mm
+                    </button>
+                  </div>
+
+                  <div className="servo-dashboard-presets">
+                    <button className="ghost-pill" type="button" onClick={homeByj1} disabled={bAxisCommandPending}>
+                      Home BYJ1
+                    </button>
+                    <button className="ghost-pill" type="button" onClick={refreshByjStatus} disabled={bAxisCommandPending}>
+                      Refresh BYJ1
+                    </button>
+                  </div>
+                </article>
+
+                <article className="next-step-card servo-dashboard-card">
+                  <div className="servo-dashboard-head">
+                    <div>
+                      <span>BYJ2 State</span>
+                      <strong>{byj2State?.moving ? "Moving" : "Idle"}</strong>
+                    </div>
+                    <p>{byj2State?.enabled ? "Enabled" : "Disabled"}</p>
+                  </div>
+
+                  <div className="byj-status-grid">
+                    <div className="next-step-card">
+                      <span>Position</span>
+                      <strong>{byj2State?.pos ?? 0} step</strong>
+                    </div>
+                    <div className="next-step-card">
+                      <span>Target</span>
+                      <strong>{byj2State?.target ?? 0} step</strong>
+                    </div>
+                    <div className="next-step-card">
+                      <span>Velocity</span>
+                      <strong>{byj2State?.vel ?? 0}</strong>
+                    </div>
+                    <div className="next-step-card">
+                      <span>Direction</span>
+                      <strong>{byj2Direction}</strong>
+                    </div>
+                  </div>
+
+                  <div className="servo-dashboard-body">
+                    <label className="b-axis-tune-field servo-dashboard-field">
+                      <span>Step</span>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={byj2StepInput}
+                        onChange={(event) => setByj2StepInput(event.target.value)}
+                        disabled={bAxisCommandPending}
+                      />
+                    </label>
+
+                    <div className="servo-dashboard-presets">
+                      <button
+                        className={`ghost-pill${byj2Direction === "+" ? " is-active" : ""}`}
+                        type="button"
+                        onClick={() => setByj2Direction("+")}
+                        disabled={bAxisCommandPending}
+                      >
+                        Dir +
+                      </button>
+                      <button
+                        className={`ghost-pill${byj2Direction === "-" ? " is-active" : ""}`}
+                        type="button"
+                        onClick={() => setByj2Direction("-")}
+                        disabled={bAxisCommandPending}
+                      >
+                        Dir -
+                      </button>
+                    </div>
+
+                    <button
+                      className="ghost-pill servo-dashboard-apply"
+                      type="button"
+                      onClick={runByj2Move}
+                      disabled={bAxisCommandPending}
+                    >
+                      Run
+                    </button>
+                  </div>
+
+                  <div className="servo-dashboard-presets">
+                    <button className="ghost-pill" type="button" onClick={pauseByj2} disabled={bAxisCommandPending}>
+                      Pause
+                    </button>
+                    <button className="ghost-pill" type="button" onClick={() => jogByj2("+")} disabled={bAxisCommandPending}>
+                      Jog +
+                    </button>
+                    <button className="ghost-pill" type="button" onClick={() => jogByj2("-")} disabled={bAxisCommandPending}>
+                      Jog -
+                    </button>
+                    <button className="ghost-pill" type="button" onClick={refreshByjStatus} disabled={bAxisCommandPending}>
+                      Refresh BYJ2
+                    </button>
+                  </div>
+                </article>
+              </div>
+            </div>
+
+          </div>
+        </section>
+      ) : null}
+
+      {page.bridge?.bAxisTuning && showWorkspaceTab ? (
+        <section
+          ref={(element) => {
+            sectionRefs.current.workspace = element;
+          }}
+          className="featured-device-card ab-workspace-shell"
+        >
+          <div className="ab-workspace-layout">
+            <div className="ab-workspace-panel ab-workspace-side-panel ab-workspace-stats-panel">
+              <div className="ab-workspace-stats">
+                <div className="next-step-card">
+                  <span>Selected A</span>
+                  <strong>{selectedABTarget?.aTargetMm ?? "-"} mm</strong>
+                </div>
+                <div className="next-step-card">
+                  <span>Selected B</span>
+                  <strong>{selectedABTarget?.bTargetMm ?? "-"} mm</strong>
+                </div>
+                <div className="next-step-card">
+                  <span>Axis A</span>
+                  <strong>{motionState.a?.homed ? "Homed" : "Not Homed"}</strong>
+                </div>
+                <div className="next-step-card">
+                  <span>Axis B</span>
+                  <strong>{motionState.b?.homed ? "Homed" : "Not Homed"}</strong>
+                </div>
+                <div className="next-step-card">
+                  <span>AB Motion</span>
+                  <strong>{anyAxisMoving ? "Moving" : "Idle"}</strong>
+                </div>
+                <div className="next-step-card">
+                  <span>Travel</span>
+                  <strong>{aTravelMm.toFixed(2)} / {bTravelMm.toFixed(2)} mm</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="ab-workspace-panel ab-workspace-map-panel">
+              <div className="ab-workspace-head">
+                <div className="device-status-pill">{anyAxisMoving ? "Moving" : "Idle"}</div>
+                <strong>
+                  A {currentAMm.toFixed(2)} mm / B {currentBMm.toFixed(2)} mm
+                </strong>
+              </div>
+              <ABWorkspaceMap
+                aTravelMm={aTravelMm}
+                bTravelMm={bTravelMm}
+                currentAMarker={currentAMarker}
+                currentBMarker={currentBMarker}
+                targetAMarker={targetAMarker}
+                targetBMarker={targetBMarker}
+                selectedAMarker={selectedAMarker}
+                selectedBMarker={selectedBMarker}
+                onSelect={selectABTarget}
+              />
+            </div>
+
+            <div className="ab-workspace-panel ab-workspace-side-panel ab-workspace-controls-panel">
+              <div className="b-axis-tune-grid">
+                <div className="next-step-card b-axis-tune-field">
+                  <span>A Target (mm)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max={aTravelMm > 0 ? aTravelMm : undefined}
+                    value={selectedATargetMmInput}
+                    onChange={(event) => {
+                      const nextA = event.target.value;
+                      setSelectedATargetMmInput(nextA);
+                      if (nextA !== "" && selectedBTargetMmInput !== "") {
+                        const parsedA = clampNumber(Number.parseFloat(nextA), 0, aTravelMm);
+                        const parsedB = clampNumber(Number.parseFloat(selectedBTargetMmInput), 0, bTravelMm);
+                        if (Number.isFinite(parsedA) && Number.isFinite(parsedB)) {
+                          setSelectedABTarget({ aTargetMm: parsedA, bTargetMm: parsedB });
+                        }
+                      }
+                    }}
+                  />
+                </div>
+                <div className="next-step-card b-axis-tune-field">
+                  <span>B Target (mm)</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max={bTravelMm > 0 ? bTravelMm : undefined}
+                    value={selectedBTargetMmInput}
+                    onChange={(event) => {
+                      const nextB = event.target.value;
+                      setSelectedBTargetMmInput(nextB);
+                      if (selectedATargetMmInput !== "" && nextB !== "") {
+                        const parsedA = clampNumber(Number.parseFloat(selectedATargetMmInput), 0, aTravelMm);
+                        const parsedB = clampNumber(Number.parseFloat(nextB), 0, bTravelMm);
+                        if (Number.isFinite(parsedA) && Number.isFinite(parsedB)) {
+                          setSelectedABTarget({ aTargetMm: parsedA, bTargetMm: parsedB });
+                        }
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="featured-action-group b-axis-tune-actions">
+                <button
+                  className="ghost-pill"
+                  type="button"
+                  onClick={() => {
+                    const aTargetMm = Number((aTravelMm / 2).toFixed(2));
+                    const bTargetMm = Number((bTravelMm / 2).toFixed(2));
+                    setSelectedABTarget({ aTargetMm, bTargetMm });
+                    setSelectedATargetMmInput(String(aTargetMm));
+                    setSelectedBTargetMmInput(String(bTargetMm));
+                  }}
+                  disabled={bAxisCommandPending}
+                >
+                  Select Center
+                </button>
+                <button className="ghost-pill" type="button" onClick={sendABNowFromInputs} disabled={bAxisCommandPending}>
+                  Apply
+                </button>
+                <button
+                  className="ghost-pill"
+                  type="button"
+                  onClick={() => {
+                    setSelectedABTarget(null);
+                    setSelectedATargetMmInput("");
+                    setSelectedBTargetMmInput("");
+                  }}
+                  disabled={bAxisCommandPending}
+                >
+                  Clear
+                </button>
+                <button className="ghost-pill" type="button" onClick={homeAAxis} disabled={bAxisCommandPending}>
+                  Home A
+                </button>
+                <button className="ghost-pill" type="button" onClick={homeBAxis} disabled={bAxisCommandPending}>
+                  Home B
+                </button>
+                <button className="ghost-pill" type="button" onClick={scanAAxisTravel} disabled={bAxisCommandPending}>
+                  Scan A
+                </button>
+                <button className="ghost-pill" type="button" onClick={scanBAxisTravel} disabled={bAxisCommandPending}>
+                  Scan B
+                </button>
+                <button className="ghost-pill" type="button" onClick={stopABMotion} disabled={bAxisCommandPending}>
+                  Stop All
+                </button>
+              </div>
+            </div>
           </div>
         </section>
       ) : null}
 
       {page.bridge ? (
         <section className="tv-control-grid">
-          <article className="tv-control-card">
-            <span className="eyebrow">Recent Bridge Logs</span>
-            <div className="alert-stack">
-              {bridgeLogs.length ? (
-                bridgeLogs
-                  .slice()
-                  .reverse()
-                  .map((item, index) => (
-                    <div key={`${item.ts}-${item.direction}-${index}`} className="alert-row">
-                      <strong>{item.direction.toUpperCase()}</strong>
-                      <span>
-                        {item.ts ? new Date(item.ts * 1000).toLocaleTimeString() : "No timestamp"}
-                      </span>
-                      <p>{item.payload}</p>
-                    </div>
-                  ))
-              ) : (
-                <div className="alert-row">
-                  <strong>INFO</strong>
-                  <span>Bridge</span>
-                  <p>No logs received yet from this board.</p>
-                </div>
-              )}
-            </div>
-          </article>
-
           <article className="tv-control-card">
             <span className="eyebrow">Gateway Route</span>
             <div className="chip-grid">

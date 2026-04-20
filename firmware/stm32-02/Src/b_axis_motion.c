@@ -1,14 +1,15 @@
 #include "b_axis_motion.h"
+#include "axis_travel_store.h"
 
 #include <limits.h>
 #include <stdio.h>
 
 #define B_STEP_PULSE_HIGH_US     5U
 #define B_HOME_SEEK_LIMIT_STEPS  50000U
-#define B_HOME_RELEASE_STEPS     1000U
 #define B_HOME_RELEASE_LIMIT     8000U
 #define B_SCAN_MAX_LIMIT_STEPS   60000U
-#define B_SCAN_INTERVAL_US       5000U
+#define B_SCAN_INTERVAL_US       1000U
+#define B_DEFAULT_TRAVEL_STEPS   5656U
 #define B_HOME_SEEK_DIRECTION    (-1)
 #define B_HOME_RELEASE_DIRECTION 1
 
@@ -42,6 +43,26 @@ typedef struct
   volatile uint8_t pulse_high_phase;
 } BMotionState;
 
+typedef enum
+{
+  B_SEQUENCE_IDLE = 0,
+  B_SEQUENCE_HOME_SEEK,
+  B_SEQUENCE_HOME_RELEASE,
+  B_SEQUENCE_SCAN_HOME_SEEK,
+  B_SEQUENCE_SCAN_HOME_RELEASE,
+  B_SEQUENCE_SCAN_SEEK_MAX,
+  B_SEQUENCE_SCAN_RETURN_HOME_SEEK,
+  B_SEQUENCE_SCAN_RETURN_HOME_RELEASE
+} BSequenceState;
+
+typedef struct
+{
+  BSequenceState state;
+  int32_t phase_start_position;
+  uint32_t release_steps;
+  uint32_t measured_travel;
+} BSequenceControl;
+
 static BAxisState b_axis = {
   .enabled = 0U,
   .moving = 0U,
@@ -50,15 +71,16 @@ static BAxisState b_axis = {
   .position = 0,
   .target = 0,
   .velocity = 0,
-  .travel_steps = 22991U,
+  .travel_steps = B_DEFAULT_TRAVEL_STEPS,
   .decel_window_steps = 300U,
   .start_interval_us = 2000U,
   .cruise_interval_us = 100U,
-  .homing_interval_us = 100U,
+  .homing_interval_us = 40U,
   .accel_interval_delta_us = 10U,
 };
 
 static BMotionState b_motion = {0};
+static BSequenceControl b_sequence = {0};
 
 static GPIO_PinState b_dir_level(int32_t direction)
 {
@@ -93,6 +115,32 @@ static void b_motion_rearm(uint32_t interval_us)
 {
   __HAL_TIM_SET_AUTORELOAD(&htim6, interval_us - 1U);
   __HAL_TIM_SET_COUNTER(&htim6, 0U);
+}
+
+static void b_motion_halt(void)
+{
+  HAL_TIM_Base_Stop_IT(&htim6);
+  b_motion.active = 0U;
+  b_motion.continuous = 0U;
+  b_motion.pulse_high_phase = 0U;
+  b_motion.steps_remaining = 0U;
+  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+}
+
+static void b_axis_mark_stopped(void)
+{
+  b_axis.target = b_axis.position;
+  b_axis.velocity = 0;
+  b_axis.moving = 0U;
+}
+
+static void b_axis_motion_abort_sequence(void)
+{
+  b_sequence.state = B_SEQUENCE_IDLE;
+  b_sequence.phase_start_position = b_axis.position;
+  b_sequence.release_steps = 0U;
+  b_sequence.measured_travel = 0U;
+  b_axis.homing_state = 0U;
 }
 
 static void b_motion_start(int32_t direction, uint32_t steps, uint32_t interval_us, uint8_t stop_on_endstop)
@@ -146,31 +194,9 @@ static void b_motion_start_continuous(int32_t direction, uint32_t interval_us)
 
 void b_axis_motion_stop(void)
 {
-  HAL_TIM_Base_Stop_IT(&htim6);
-  b_motion.active = 0U;
-  b_motion.continuous = 0U;
-  b_motion.pulse_high_phase = 0U;
-  b_motion.steps_remaining = 0U;
-  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
-
-  b_axis.target = b_axis.position;
-  b_axis.velocity = 0;
-  b_axis.moving = 0U;
-  b_axis.homing_state = 0U;
-}
-
-static void b_motion_wait(void)
-{
-  while (b_motion.active != 0U)
-  {
-  }
-}
-
-static uint32_t b_run_steps(int32_t direction, uint32_t steps, uint16_t interval_us, uint8_t stop_on_endstop)
-{
-  b_motion_start(direction, steps, interval_us, stop_on_endstop);
-  b_motion_wait();
-  return b_motion.moved_steps;
+  b_motion_halt();
+  b_axis_mark_stopped();
+  b_axis_motion_abort_sequence();
 }
 
 static uint32_t b_target_interval_for_position(void)
@@ -201,13 +227,24 @@ static uint32_t b_target_interval_for_position(void)
   return b_motion.interval_us + (uint32_t)(((uint64_t)ramp_span * (uint64_t)(b_axis.decel_window_steps - distance_to_edge)) / (uint64_t)b_axis.decel_window_steps);
 }
 
+static uint32_t b_position_delta_since_phase_start(void)
+{
+  int32_t delta = b_axis.position - b_sequence.phase_start_position;
+  if (delta < 0)
+  {
+    delta = -delta;
+  }
+  return (uint32_t)delta;
+}
+
 void b_axis_motion_irq(void)
 {
   uint32_t target_interval;
 
   if (b_motion.active == 0U || b_axis.enabled == 0U)
   {
-    b_axis_motion_stop();
+    b_motion_halt();
+    b_axis_mark_stopped();
     return;
   }
 
@@ -218,13 +255,15 @@ void b_axis_motion_irq(void)
       if (b_motion.direction < 0 && b_min_endstop_triggered())
       {
         printf("axis b irq stop min dir %ld pos %ld\r\n", (long)b_motion.direction, (long)b_axis.position);
-        b_axis_motion_stop();
+        b_motion_halt();
+        b_axis_mark_stopped();
         return;
       }
       if (b_motion.direction > 0 && b_max_endstop_triggered())
       {
         printf("axis b irq stop max dir %ld pos %ld\r\n", (long)b_motion.direction, (long)b_axis.position);
-        b_axis_motion_stop();
+        b_motion_halt();
+        b_axis_mark_stopped();
         return;
       }
     }
@@ -262,7 +301,8 @@ void b_axis_motion_irq(void)
     b_motion.steps_remaining--;
     if (b_motion.steps_remaining == 0U)
     {
-      b_axis_motion_stop();
+      b_motion_halt();
+      b_axis_mark_stopped();
       return;
     }
   }
@@ -327,126 +367,55 @@ void b_axis_motion_set_accel_delta(uint16_t accel_interval_delta_us)
 
 void b_axis_motion_home(void)
 {
-  uint32_t seek_steps = 0U;
-  uint32_t release_steps = 0U;
-
   if (b_axis.enabled == 0U)
   {
     printf("err axis b disabled\r\n");
     return;
   }
 
+  b_motion_halt();
+  b_axis_mark_stopped();
   b_axis.homed = 0U;
-  b_axis.homing_state = 1U;
   b_axis.moving = 1U;
   b_axis.velocity = B_HOME_SEEK_DIRECTION;
   b_axis.target = (B_HOME_SEEK_DIRECTION > 0) ? INT32_MAX : INT32_MIN;
+  b_axis.homing_state = 1U;
+  b_sequence.state = B_SEQUENCE_HOME_SEEK;
+  b_sequence.phase_start_position = b_axis.position;
+  b_sequence.release_steps = 0U;
+  b_sequence.measured_travel = 0U;
   printf("axis b home begin seek_dir %ld release_dir %ld endstop_min %s endstop_max %s\r\n",
          (long)B_HOME_SEEK_DIRECTION,
          (long)B_HOME_RELEASE_DIRECTION,
          b_min_endstop_triggered() ? "trig" : "clear",
          b_max_endstop_triggered() ? "trig" : "clear");
-
-  while (!b_min_endstop_triggered() && seek_steps < B_HOME_SEEK_LIMIT_STEPS)
-  {
-    uint32_t moved = b_run_steps(B_HOME_SEEK_DIRECTION, 50U, b_axis.homing_interval_us, 1U);
-    seek_steps += moved;
-    printf("axis b home seek_steps %lu pos %ld endstop_min %s\r\n",
-           (unsigned long)seek_steps,
-           (long)b_axis.position,
-           b_min_endstop_triggered() ? "trig" : "clear");
-    if (moved == 0U)
-    {
-      break;
-    }
-  }
-
-  if (!b_min_endstop_triggered())
-  {
-    printf("err axis b home seek timeout\r\n");
-    b_axis_motion_stop();
-    return;
-  }
-
-  b_axis.homing_state = 2U;
-  while (b_min_endstop_triggered() && release_steps < B_HOME_RELEASE_LIMIT)
-  {
-    release_steps += b_run_steps(B_HOME_RELEASE_DIRECTION, B_HOME_RELEASE_STEPS, 1000U, 0U);
-    printf("axis b home release_steps %lu pos %ld endstop_min %s\r\n",
-           (unsigned long)release_steps,
-           (long)b_axis.position,
-           b_min_endstop_triggered() ? "trig" : "clear");
-  }
-
-  if (b_min_endstop_triggered())
-  {
-    printf("err axis b home release timeout\r\n");
-    b_axis_motion_stop();
-    return;
-  }
-
-  b_axis.position = 0;
-  b_axis.homed = 1U;
-  b_axis_motion_stop();
-  printf("ok axis b homed release_steps %lu\r\n", (unsigned long)release_steps);
+  b_motion_start_continuous(B_HOME_SEEK_DIRECTION, b_axis.homing_interval_us);
 }
 
 void b_axis_motion_scan(void)
 {
-  uint32_t travel_steps = 0U;
-  uint32_t measured_travel = 0U;
-
-  b_axis_motion_home();
-  if (b_axis.homed == 0U)
+  if (b_axis.enabled == 0U)
   {
+    printf("err axis b disabled\r\n");
     return;
   }
 
-  HAL_Delay(50U);
-
-  b_axis.homing_state = 5U;
+  b_motion_halt();
+  b_axis_mark_stopped();
+  b_axis.homed = 0U;
   b_axis.moving = 1U;
-  b_axis.velocity = 1;
-  b_axis.target = INT32_MAX;
+  b_axis.velocity = B_HOME_SEEK_DIRECTION;
+  b_axis.target = (B_HOME_SEEK_DIRECTION > 0) ? INT32_MAX : INT32_MIN;
+  b_axis.homing_state = 3U;
+  b_sequence.state = B_SEQUENCE_SCAN_HOME_SEEK;
+  b_sequence.phase_start_position = b_axis.position;
+  b_sequence.release_steps = 0U;
+  b_sequence.measured_travel = 0U;
   printf("axis b scan begin dir 1 endstop_min %s endstop_max %s pos %ld\r\n",
          b_min_endstop_triggered() ? "trig" : "clear",
          b_max_endstop_triggered() ? "trig" : "clear",
          (long)b_axis.position);
-
-  while (!b_max_endstop_triggered() && travel_steps < B_SCAN_MAX_LIMIT_STEPS)
-  {
-    uint32_t moved = b_run_steps(1, 10U, B_SCAN_INTERVAL_US, 1U);
-    travel_steps += moved;
-    printf("axis b scan seek_max_steps %lu pos %ld endstop_max %s\r\n",
-           (unsigned long)travel_steps,
-           (long)b_axis.position,
-           b_max_endstop_triggered() ? "trig" : "clear");
-    if (moved == 0U)
-    {
-      break;
-    }
-  }
-
-  if (!b_max_endstop_triggered())
-  {
-    printf("err axis b scan seek_max timeout\r\n");
-    b_axis_motion_stop();
-    return;
-  }
-
-  measured_travel = (b_axis.position > 0) ? (uint32_t)b_axis.position : b_axis.travel_steps;
-  b_axis.travel_steps = measured_travel;
-  b_axis_motion_stop();
-  printf("axis b scan measured travel_steps %lu\r\n", (unsigned long)measured_travel);
-
-  b_axis_motion_home();
-  if (b_axis.homed == 0U)
-  {
-    printf("err axis b scan return_home failed travel_steps %lu\r\n", (unsigned long)measured_travel);
-    return;
-  }
-
-  printf("ok axis b scan travel_steps %lu returned_home yes\r\n", (unsigned long)measured_travel);
+  b_motion_start_continuous(B_HOME_SEEK_DIRECTION, b_axis.homing_interval_us);
 }
 
 void b_axis_motion_jog(int32_t direction)
@@ -481,6 +450,17 @@ void b_axis_motion_goto(int32_t target)
   b_axis_motion_move_relative(delta);
 }
 
+void b_axis_motion_set_position(int32_t position, uint8_t homed)
+{
+  b_motion_halt();
+  b_axis.position = position;
+  b_axis.target = position;
+  b_axis.velocity = 0;
+  b_axis.moving = 0U;
+  b_axis.homed = homed ? 1U : 0U;
+  b_axis_motion_abort_sequence();
+}
+
 void b_axis_motion_get_snapshot(BAxisMotionSnapshot *snapshot)
 {
   if (snapshot == NULL)
@@ -497,4 +477,184 @@ void b_axis_motion_get_snapshot(BAxisMotionSnapshot *snapshot)
   snapshot->velocity = b_axis.velocity;
   snapshot->travel_steps = b_axis.travel_steps;
   snapshot->decel_window_steps = b_axis.decel_window_steps;
+}
+
+void b_axis_motion_update(void)
+{
+  switch (b_sequence.state)
+  {
+    case B_SEQUENCE_IDLE:
+      return;
+
+    case B_SEQUENCE_HOME_SEEK:
+      if (b_motion.active != 0U)
+      {
+        if (b_position_delta_since_phase_start() >= B_HOME_SEEK_LIMIT_STEPS)
+        {
+          printf("err axis b home seek timeout\r\n");
+          b_axis_motion_stop();
+        }
+        return;
+      }
+      if (!b_min_endstop_triggered())
+      {
+        return;
+      }
+      b_axis.homing_state = 2U;
+      b_sequence.state = B_SEQUENCE_HOME_RELEASE;
+      b_sequence.release_steps = 0U;
+      return;
+
+    case B_SEQUENCE_HOME_RELEASE:
+      if (b_motion.active != 0U)
+      {
+        return;
+      }
+      if (!b_min_endstop_triggered())
+      {
+        b_axis.position = 0;
+        b_axis.homed = 1U;
+        b_axis_mark_stopped();
+        printf("ok axis b homed release_steps %lu\r\n", (unsigned long)b_sequence.release_steps);
+        b_axis_motion_abort_sequence();
+        return;
+      }
+      if (b_sequence.release_steps >= B_HOME_RELEASE_LIMIT)
+      {
+        printf("err axis b home release timeout\r\n");
+        b_axis_motion_stop();
+        return;
+      }
+      b_axis.moving = 1U;
+      b_axis.velocity = B_HOME_RELEASE_DIRECTION;
+      b_axis.target = INT32_MAX;
+      b_motion_start(B_HOME_RELEASE_DIRECTION, 1U, b_axis.homing_interval_us, 0U);
+      b_sequence.release_steps++;
+      return;
+
+    case B_SEQUENCE_SCAN_HOME_SEEK:
+      if (b_motion.active != 0U)
+      {
+        if (b_position_delta_since_phase_start() >= B_HOME_SEEK_LIMIT_STEPS)
+        {
+          printf("err axis b home seek timeout\r\n");
+          b_axis_motion_stop();
+        }
+        return;
+      }
+      if (!b_min_endstop_triggered())
+      {
+        return;
+      }
+      b_axis.homing_state = 4U;
+      b_sequence.state = B_SEQUENCE_SCAN_HOME_RELEASE;
+      b_sequence.release_steps = 0U;
+      return;
+
+    case B_SEQUENCE_SCAN_HOME_RELEASE:
+      if (b_motion.active != 0U)
+      {
+        return;
+      }
+      if (!b_min_endstop_triggered())
+      {
+        b_axis.position = 0;
+        b_axis.homing_state = 5U;
+        b_axis.moving = 1U;
+        b_axis.velocity = 1;
+        b_axis.target = INT32_MAX;
+        b_sequence.state = B_SEQUENCE_SCAN_SEEK_MAX;
+        b_sequence.phase_start_position = b_axis.position;
+        b_motion_start_continuous(1, B_SCAN_INTERVAL_US);
+        return;
+      }
+      if (b_sequence.release_steps >= B_HOME_RELEASE_LIMIT)
+      {
+        printf("err axis b home release timeout\r\n");
+        b_axis_motion_stop();
+        return;
+      }
+      b_axis.moving = 1U;
+      b_axis.velocity = B_HOME_RELEASE_DIRECTION;
+      b_axis.target = INT32_MAX;
+      b_motion_start(B_HOME_RELEASE_DIRECTION, 1U, b_axis.homing_interval_us, 0U);
+      b_sequence.release_steps++;
+      return;
+
+    case B_SEQUENCE_SCAN_SEEK_MAX:
+      if (b_motion.active != 0U)
+      {
+        if (b_position_delta_since_phase_start() >= B_SCAN_MAX_LIMIT_STEPS)
+        {
+          printf("err axis b scan seek_max timeout\r\n");
+          b_axis_motion_stop();
+        }
+        return;
+      }
+      if (!b_max_endstop_triggered())
+      {
+        return;
+      }
+      b_sequence.measured_travel = (b_axis.position > 0) ? (uint32_t)b_axis.position : b_axis.travel_steps;
+      b_axis.travel_steps = b_sequence.measured_travel;
+      b_axis.homed = 0U;
+      b_axis.homing_state = 3U;
+      b_axis.moving = 1U;
+      b_axis.velocity = B_HOME_SEEK_DIRECTION;
+      b_axis.target = (B_HOME_SEEK_DIRECTION > 0) ? INT32_MAX : INT32_MIN;
+      b_sequence.state = B_SEQUENCE_SCAN_RETURN_HOME_SEEK;
+      b_sequence.phase_start_position = b_axis.position;
+      b_motion_start_continuous(B_HOME_SEEK_DIRECTION, b_axis.homing_interval_us);
+      return;
+
+    case B_SEQUENCE_SCAN_RETURN_HOME_SEEK:
+      if (b_motion.active != 0U)
+      {
+        if (b_position_delta_since_phase_start() >= B_HOME_SEEK_LIMIT_STEPS)
+        {
+          printf("err axis b home seek timeout\r\n");
+          b_axis_motion_stop();
+        }
+        return;
+      }
+      if (!b_min_endstop_triggered())
+      {
+        return;
+      }
+      b_axis.homing_state = 4U;
+      b_sequence.state = B_SEQUENCE_SCAN_RETURN_HOME_RELEASE;
+      b_sequence.release_steps = 0U;
+      return;
+
+    case B_SEQUENCE_SCAN_RETURN_HOME_RELEASE:
+      if (b_motion.active != 0U)
+      {
+        return;
+      }
+      if (!b_min_endstop_triggered())
+      {
+        b_axis.position = 0;
+        b_axis.homed = 1U;
+        b_axis_mark_stopped();
+        if (axis_travel_store_save_b(b_sequence.measured_travel) == 0U)
+        {
+          printf("err axis b travel save\r\n");
+        }
+        printf("ok axis b scan travel_steps %lu returned_home yes\r\n", (unsigned long)b_sequence.measured_travel);
+        b_axis_motion_abort_sequence();
+        return;
+      }
+      if (b_sequence.release_steps >= B_HOME_RELEASE_LIMIT)
+      {
+        printf("err axis b home release timeout\r\n");
+        b_axis_motion_stop();
+        return;
+      }
+      b_axis.moving = 1U;
+      b_axis.velocity = B_HOME_RELEASE_DIRECTION;
+      b_axis.target = INT32_MAX;
+      b_motion_start(B_HOME_RELEASE_DIRECTION, 1U, b_axis.homing_interval_us, 0U);
+      b_sequence.release_steps++;
+      return;
+  }
 }

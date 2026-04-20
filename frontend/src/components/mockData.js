@@ -206,6 +206,33 @@ export const pageContent = {
     title: "Secondary bedroom controls with simple lighting and comfort states.",
     description:
       "This page should stay lightweight and fast, showing only the toggles and environment signals needed for daily use.",
+    roomNode: {
+      title: "Bedroom 2 Node 01",
+      apiPath: "/api/node/bedroom-2-01",
+      relays: [{ key: "relay", label: "Relay" }],
+      touches: [{ key: "touch", label: "Touch" }],
+      ledModes: [
+        { key: "auto", label: "Auto" },
+        { key: "on", label: "On" },
+        { key: "off", label: "Off" },
+        { key: "breathe", label: "Breathe" },
+        { key: "blink_slow", label: "Blink Slow" },
+        { key: "blink_fast", label: "Blink Fast" },
+        { key: "double_blink", label: "Double Blink" },
+        { key: "heartbeat", label: "Heartbeat" },
+        { key: "pulse", label: "Pulse" },
+        { key: "candle", label: "Candle" },
+      ],
+      ledModeScopedByRelay: false,
+    },
+    roomNodeSecondary: {
+      title: "Bedroom 2 Node 02",
+      apiPath: "/api/node/bedroom-2-02",
+      touches: [{ key: "touch", label: "Touch" }],
+      remoteRelayLabel: "Remote Relay",
+      remoteRelayToggleAction: { action: "toggle_remote" },
+      remoteRelaySyncAction: { action: "sync_remote" },
+    },
     highlights: [
       {
         title: "Devices",
@@ -267,7 +294,10 @@ export const pageContent = {
     title: "Unified aquarium controls for core life support, motion and lighting.",
     description:
       "This page groups the three STM32 aquarium subsystems into one module so daily operation stays in a single place.",
-    deviceStrip: [{ id: "control", label: "Control", icon: "control" }],
+    deviceStrip: [
+      { id: "control", label: "Control", icon: "control" },
+      { id: "workspace", label: "AB Workspace", icon: "control" },
+    ],
     bridge: {
       eyebrow: "Motion Bridge",
       kind: "STM32 #02",
@@ -275,8 +305,11 @@ export const pageContent = {
       apiPath: "/api/stm32/02",
       note: "B-axis motion tuning is exposed here so travel length and near-endstop deceleration can be adjusted without reflashing.",
       bAxisTuning: {
-        defaultTravelSteps: 22991,
+        defaultATravelSteps: 49983,
+        defaultTravelSteps: 5656,
         defaultDecelWindowSteps: 300,
+        aMmPerStep: 0.0125,
+        bMmPerStep: 0.05,
       },
     },
     pumpControl: {
@@ -396,7 +429,7 @@ export const pageContent = {
             "B STEP: PA8 / CN10-23",
             "B DIR: PC7 / CN5-2",
             "A Min Endstop: PA9 / CN5-1 (NC, INPUT_PULLUP)",
-            "A Max Endstop: PA10 / CN5-3 (NC, INPUT_PULLUP)",
+            "A Max Endstop: PC0 / CN7-38 (NC, INPUT_PULLUP)",
             "B Min Endstop: PB4 / CN10-27 (NC, INPUT_PULLUP)",
             "B Max Endstop: PB5 / CN10-29 (NC, INPUT_PULLUP)",
             "TMC2209 UART TX: PB10 / CN10-25",

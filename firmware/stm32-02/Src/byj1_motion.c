@@ -7,12 +7,21 @@
 #define BYJ1_STEP_HIGH_US            40U
 #define BYJ1_STEP_LOW_HOLD_US        20U
 #define BYJ1_MIN_INTERVAL_US         15U
+#define BYJ1_HOME_BACKOFF_INTERVAL_US 4000U
+
+enum
+{
+  BYJ1_HOME_STATE_IDLE = 0U,
+  BYJ1_HOME_STATE_SEEK_MIN = 1U,
+  BYJ1_HOME_STATE_BACKOFF = 2U,
+};
 
 typedef struct
 {
   uint8_t enabled;
   uint8_t moving;
   uint8_t homed;
+  uint8_t home_state;
   int32_t position;
   int32_t target;
   int32_t velocity;
@@ -27,6 +36,7 @@ static Byj1MotionState byj1 = {
   .enabled = 0U,
   .moving = 0U,
   .homed = 0U,
+  .home_state = BYJ1_HOME_STATE_IDLE,
   .position = 0,
   .target = 0,
   .velocity = 0,
@@ -112,6 +122,7 @@ void byj1_motion_init(void)
   byj1.enabled = 0U;
   byj1.moving = 0U;
   byj1.homed = 0U;
+  byj1.home_state = BYJ1_HOME_STATE_IDLE;
   byj1.position = 0;
   byj1.target = 0;
   byj1.velocity = 0;
@@ -129,6 +140,7 @@ void byj1_motion_set_enabled(uint8_t enabled)
     byj1.velocity = 0;
     byj1.target = byj1.position;
     byj1.next_step_tick = 0U;
+    byj1.home_state = BYJ1_HOME_STATE_IDLE;
   }
   byj1_apply_enable();
 }
@@ -139,6 +151,7 @@ void byj1_motion_stop(void)
   byj1.velocity = 0;
   byj1.moving = 0U;
   byj1.next_step_tick = 0U;
+  byj1.home_state = BYJ1_HOME_STATE_IDLE;
 }
 
 void byj1_motion_home(void)
@@ -149,6 +162,7 @@ void byj1_motion_home(void)
     return;
   }
   byj1.homed = 0U;
+  byj1.home_state = BYJ1_HOME_STATE_SEEK_MIN;
   byj1_begin_motion(-1, INT32_MIN);
   printf("ok byj byj1 home\r\n");
   byj1_emit_state();
@@ -161,6 +175,7 @@ void byj1_motion_jog(int32_t direction)
     printf("err byj disabled\r\n");
     return;
   }
+  byj1.home_state = BYJ1_HOME_STATE_IDLE;
   byj1_begin_motion((direction < 0) ? -1 : 1, (direction < 0) ? INT32_MIN : INT32_MAX);
   printf("ok byj byj1 jog %s\r\n", (direction < 0) ? "-" : "+");
   byj1_emit_state();
@@ -173,6 +188,7 @@ void byj1_motion_move_relative(int32_t delta)
     printf("err byj disabled\r\n");
     return;
   }
+  byj1.home_state = BYJ1_HOME_STATE_IDLE;
   byj1_begin_motion((delta == 0) ? 0 : ((delta > 0) ? 1 : -1), byj1.position + delta);
   printf("ok byj byj1 move %ld\r\n", (long)delta);
   byj1_emit_state();
@@ -185,6 +201,7 @@ void byj1_motion_goto(int32_t target)
     printf("err byj disabled\r\n");
     return;
   }
+  byj1.home_state = BYJ1_HOME_STATE_IDLE;
   byj1_begin_motion((target == byj1.position) ? 0 : ((target > byj1.position) ? 1 : -1), target);
   printf("ok byj byj1 goto %ld\r\n", (long)target);
   byj1_emit_state();
@@ -201,23 +218,40 @@ void byj1_motion_tick(void)
     return;
   }
 
-  if (byj1_motion_endstop_triggered() && byj1.velocity < 0)
+  if (byj1.home_state == BYJ1_HOME_STATE_BACKOFF)
   {
-    byj1.moving = 0U;
-    byj1.velocity = 0;
-    byj1.next_step_tick = 0U;
-    if (byj1.target == INT32_MIN)
+    if (!byj1_motion_endstop_triggered())
     {
+      byj1.moving = 0U;
+      byj1.velocity = 0;
+      byj1.next_step_tick = 0U;
       byj1.position = 0;
       byj1.target = 0;
       byj1.homed = 1U;
+      byj1.home_state = BYJ1_HOME_STATE_IDLE;
       printf("ok byj byj1 homed\r\n");
+      byj1_emit_state();
+      return;
     }
-    else
+  }
+  else if (byj1_motion_endstop_triggered() && byj1.velocity < 0)
+  {
+    if (byj1.home_state == BYJ1_HOME_STATE_SEEK_MIN && byj1.target == INT32_MIN)
     {
-      byj1.target = byj1.position;
-      printf("ok byj byj1 min_endstop\r\n");
+      byj1.velocity = 1;
+      byj1.target = INT32_MAX;
+      byj1.step_interval_ticks = byj1_ticks_from_us(BYJ1_HOME_BACKOFF_INTERVAL_US);
+      byj1.next_step_tick = byj1_tick_now();
+      byj1.home_state = BYJ1_HOME_STATE_BACKOFF;
+      byj1_emit_state();
+      return;
     }
+    byj1.moving = 0U;
+    byj1.velocity = 0;
+    byj1.next_step_tick = 0U;
+    byj1.target = byj1.position;
+    byj1.home_state = BYJ1_HOME_STATE_IDLE;
+    printf("ok byj byj1 min_endstop\r\n");
     byj1_emit_state();
     return;
   }

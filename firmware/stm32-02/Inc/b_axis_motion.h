@@ -22,6 +22,7 @@ typedef struct
 
 void b_axis_motion_init(void);
 void b_axis_motion_irq(void);
+void b_axis_motion_update(void);
 uint8_t b_axis_motion_active(void);
 
 void b_axis_motion_set_enabled(uint8_t enabled);
@@ -38,6 +39,7 @@ void b_axis_motion_scan(void);
 void b_axis_motion_jog(int32_t direction);
 void b_axis_motion_move_relative(int32_t delta);
 void b_axis_motion_goto(int32_t target);
+void b_axis_motion_set_position(int32_t position, uint8_t homed);
 
 void b_axis_motion_get_snapshot(BAxisMotionSnapshot *snapshot);
 

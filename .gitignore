@@ -16,4 +16,11 @@ build/
 *.bin
 *.map
 
+backend/state/*.sqlite3
+backend/state/*.sqlite3-shm
+backend/state/*.sqlite3-wal
+
+firmware/stm32-02-a-endstop-test/
+firmware/stm32-02-backup-before-b-purge/
+
 .DS_Store
