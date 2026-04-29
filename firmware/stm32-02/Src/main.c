@@ -114,7 +114,7 @@ static AxisState axes[] = {
     .decel_window_steps = B_TUNED_DECEL_WINDOW_STEPS,
     .start_interval_us = 2000U,
     .cruise_interval_us = 100U,
-    .homing_interval_us = 2000U,
+    .homing_interval_us = 850U,
     .accel_interval_delta_us = 10U,
   },
 };
@@ -127,8 +127,14 @@ typedef struct
   volatile uint32_t current_interval_us;
   volatile uint32_t start_interval_us;
   volatile uint32_t accel_delta_us;
+  volatile uint32_t start_speed_q16;
+  volatile uint32_t cruise_speed_q16;
+  volatile uint32_t current_speed_q16;
+  volatile uint32_t accel_q16;
   volatile uint32_t steps_total;
   volatile uint32_t steps_done;
+  volatile uint32_t accel_until_step;
+  volatile uint32_t decel_after_step;
   volatile uint32_t a_abs_steps;
   volatile uint32_t b_abs_steps;
   volatile uint32_t a_err;
@@ -145,10 +151,29 @@ typedef struct
 
 static CoordMotionState coord_motion = {0};
 
-#define AB_COORD_START_INTERVAL_US   1400U
-#define AB_COORD_CRUISE_INTERVAL_US   150U
-#define AB_COORD_ACCEL_DELTA_US         8U
-#define AB_COORD_MIN_RAMP_STEPS       900U
+typedef struct
+{
+  volatile uint8_t active;
+  volatile uint8_t pulse_high_phase;
+  volatile uint8_t a_step_pending;
+  volatile uint8_t b_step_pending;
+  volatile uint32_t a_interval_us;
+  volatile uint32_t b_interval_us;
+  volatile uint32_t a_countdown_us;
+  volatile uint32_t b_countdown_us;
+} ABHomeMotionState;
+
+static ABHomeMotionState ab_home_motion = {0};
+
+#define AB_COORD_START_INTERVAL_US   2600U
+#define AB_COORD_CRUISE_INTERVAL_US    42U
+#define AB_COORD_ACCEL_DELTA_US        18U
+#define AB_COORD_MIN_RAMP_STEPS       600U
+#define AB_COORD_ACCEL_STEPS_PER_S2 12000U
+#define AB_AUTO_STOP_IDLE_MS        60000U
+#define AB_HOME_STEP_PULSE_HIGH_US      5U
+#define AB_HOME_BASE_INTERVAL_US       60U
+#define AB_HOME_B_INTERVAL_US         180U
 
 static volatile uint8_t tmc_rx_ring[64];
 static volatile uint16_t tmc_rx_head = 0U;
@@ -158,6 +183,9 @@ static volatile uint8_t host_rx_ring[128];
 static volatile uint16_t host_rx_head = 0U;
 static volatile uint16_t host_rx_tail = 0U;
 static uint8_t host_rx_byte = 0U;
+static uint32_t ab_auto_stop_deadline_ms = 0U;
+static uint8_t ab_auto_stop_armed = 0U;
+static const char *ab_auto_stop_reason = "none";
 
 #define BYJ1_CAL_STEPS_PER_42MM     50000L
 #define BYJ1_CAL_MM_X1000_PER_42MM  42000L
@@ -286,7 +314,7 @@ static HAL_StatusTypeDef tmc_uart_read_exact(uint8_t *bytes, uint16_t len, uint3
 static void tmc_uart_flush_rx(void);
 static void tmc_uart_dump_raw(uint32_t window_ms);
 static void host_uart_clear_errors(void);
-static void tmc_uart_boot_probe(void);
+static void tmc_apply_runtime_defaults(void);
 static HAL_StatusTypeDef tmc_uart_read_reg(uint8_t driver_addr, uint8_t reg_addr, uint32_t *value_out);
 static HAL_StatusTypeDef tmc_uart_write_reg(uint8_t driver_addr, uint8_t reg_addr, uint32_t reg_value);
 static void tmc_emit_driver_probe(uint8_t driver_addr);
@@ -304,6 +332,15 @@ static void tick_byj_steppers(void);
 static void process_command_line(char *line);
 static void tick_axes(void);
 static void axis_stop_motion(AxisState *axis);
+static uint8_t ab_home_motion_active(void);
+static void ab_home_motion_stop(void);
+static void ab_home_motion_emit_state(void);
+static void ab_home_motion_irq(void);
+static void ab_home_motion_start(void);
+static void ab_schedule_auto_stop(const char *reason);
+static void ab_clear_auto_stop(const char *reason);
+static void ab_disable_axes_and_emit(const char *event_line);
+static uint8_t any_axis_motion_busy(void);
 static uint8_t coord_motion_active(void);
 static void coord_motion_stop(void);
 static void coord_motion_irq(void);
@@ -622,6 +659,16 @@ static uint8_t axis_max_endstop_triggered(const AxisState *axis)
   return HAL_GPIO_ReadPin(axis->max_endstop_port, axis->max_endstop_pin) == GPIO_PIN_SET ? 1U : 0U;
 }
 
+static GPIO_PinState ab_home_a_dir_level(int32_t direction)
+{
+  return (direction >= 0) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+}
+
+static GPIO_PinState ab_home_b_dir_level(int32_t direction)
+{
+  return (direction >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+}
+
 static const char *axis_homing_state_name(const AxisState *axis)
 {
   switch (axis->homing_state)
@@ -687,6 +734,26 @@ static const char *a_snapshot_homing_state_name(const AAxisMotionSnapshot *snaps
 
 static void emit_axis_state(const AxisState *axis)
 {
+  if (ab_home_motion.active != 0U && (axis == &axes[0] || axis == &axes[1]))
+  {
+    printf(
+      "axis %s enabled %s moving %s pos %ld target %ld vel %ld homed %s homing %s endstop_min %s endstop_max %s travel %lu decel_window %lu\r\n",
+      axis->key,
+      axis->enabled ? "on" : "off",
+      axis->moving ? "on" : "off",
+      (long)axis->position,
+      (long)axis->target,
+      (long)axis->velocity,
+      axis->homed ? "yes" : "no",
+      axis_homing_state_name(axis),
+      axis_min_endstop_triggered(axis) ? "trig" : "clear",
+      axis_max_endstop_triggered(axis) ? "trig" : "clear",
+      (unsigned long)axis_effective_travel_steps(axis),
+      (unsigned long)axis->decel_window_steps
+    );
+    return;
+  }
+
   if (strcmp(axis->key, "a") == 0)
   {
     AAxisMotionSnapshot snapshot;
@@ -864,11 +931,49 @@ static void axis_stop_motion(AxisState *axis)
   axis->velocity = 0;
   axis->moving = 0U;
   axis->homing_state = 0U;
+  axis->homed = 0U;
   axis->next_step_tick = 0U;
   axis->timer_countdown_ticks = 0U;
   axis->dir_setup_ticks = 0U;
   axis->step_high_ticks = 0U;
   HAL_GPIO_WritePin(axis->step_port, axis->step_pin, GPIO_PIN_RESET);
+}
+
+static void ab_schedule_auto_stop(const char *reason)
+{
+  ab_auto_stop_deadline_ms = HAL_GetTick() + AB_AUTO_STOP_IDLE_MS;
+  ab_auto_stop_armed = 1U;
+  ab_auto_stop_reason = (reason != NULL) ? reason : "unknown";
+  printf("ab auto_stop arm src %s deadline_ms %lu\r\n",
+         ab_auto_stop_reason,
+         (unsigned long)ab_auto_stop_deadline_ms);
+}
+
+static void ab_clear_auto_stop(const char *reason)
+{
+  if (ab_auto_stop_deadline_ms != 0U || ab_auto_stop_armed != 0U)
+  {
+    printf("ab auto_stop clear src %s prev_src %s deadline_ms %lu\r\n",
+           (reason != NULL) ? reason : "unknown",
+           ab_auto_stop_reason,
+           (unsigned long)ab_auto_stop_deadline_ms);
+  }
+  ab_auto_stop_deadline_ms = 0U;
+  ab_auto_stop_armed = 0U;
+  ab_auto_stop_reason = "none";
+}
+
+static uint8_t any_axis_motion_busy(void)
+{
+  if (coord_motion_active() != 0U || ab_home_motion_active() != 0U)
+  {
+    return 1U;
+  }
+  if (a_axis_motion_active() != 0U || b_axis_motion_active() != 0U)
+  {
+    return 1U;
+  }
+  return 0U;
 }
 
 static void step_delay_us(uint16_t us)
@@ -1066,22 +1171,28 @@ static void tmc_uart_dump_raw(uint32_t window_ms)
   printf("\r\n");
 }
 
-static void tmc_uart_boot_probe(void)
+static void tmc_apply_runtime_defaults(void)
 {
+  uint8_t prev_a_enabled = axes[0].enabled;
+  uint8_t prev_b_enabled = axes[1].enabled;
+
   axes[0].enabled = 1U;
+  axes[1].enabled = 1U;
   apply_axis_enable_state();
   HAL_Delay(10U);
-  tmc_emit_driver_probe(axes[0].driver_addr);
+
   tmc_set_driver_stealth(&axes[0], 0U);
   tmc_set_driver_microsteps(&axes[0], 16U);
-  tmc_set_driver_current(&axes[0], 600U);
-  tmc_emit_driver_status(&axes[0]);
-  tmc_emit_driver_probe(axes[1].driver_addr);
+  tmc_set_driver_current(&axes[0], 1000U);
   tmc_set_driver_stealth(&axes[1], 0U);
-  tmc_set_driver_microsteps(&axes[1], 4U);
-  tmc_set_driver_current(&axes[1], 1000U);
+  tmc_set_driver_microsteps(&axes[1], 16U);
+  tmc_set_driver_current(&axes[1], 600U);
+  tmc_emit_driver_status(&axes[0]);
   tmc_emit_driver_status(&axes[1]);
-  tmc_uart_dump_raw(40U);
+
+  axes[0].enabled = prev_a_enabled;
+  axes[1].enabled = prev_b_enabled;
+  apply_axis_enable_state();
 }
 
 static void host_uart_clear_errors(void)
@@ -1545,23 +1656,92 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[1], "status") == 0)
     {
+      if (ab_home_motion_active() != 0U)
+      {
+        ab_home_motion_emit_state();
+        return;
+      }
       coord_motion_emit_state();
       return;
     }
 
     if (strcmp(tokens[1], "stop") == 0)
     {
-      a_axis_motion_get_snapshot(&a_snapshot);
-      b_axis_motion_get_snapshot(&b_snapshot);
-      coord_motion_stop();
-      a_axis_motion_stop();
-      b_axis_motion_stop();
-      a_axis_motion_set_position(a_snapshot.position, 0U);
-      b_axis_motion_set_position(b_snapshot.position, 0U);
-      uart_write_line("ok ab stop");
-      coord_motion_emit_state();
+      if (ab_home_motion_active() != 0U)
+      {
+        ab_home_motion_stop();
+        a_axis_motion_set_position(axes[0].position, 0U);
+        b_axis_motion_set_position(axes[1].position, 0U);
+        axes[0].enabled = 0U;
+        axes[1].enabled = 0U;
+        a_axis_motion_set_enabled(0U);
+        b_axis_motion_set_enabled(0U);
+        apply_axis_enable_state();
+        ab_clear_auto_stop("ab stop");
+        uart_write_line("ok ab stop");
+        ab_home_motion_emit_state();
+        emit_axis_state(&axes[0]);
+        emit_axis_state(&axes[1]);
+        return;
+      }
+      ab_disable_axes_and_emit("ok ab stop");
+      return;
+    }
+
+    if (strcmp(tokens[1], "home") == 0)
+    {
+      if (any_axis_motion_busy() != 0U)
+      {
+        uart_write_line("err ab busy");
+        return;
+      }
+      axes[0].enabled = 1U;
+      axes[1].enabled = 1U;
+      apply_axis_enable_state();
+      a_axis_motion_set_enabled(1U);
+      b_axis_motion_set_enabled(1U);
+      ab_clear_auto_stop("ab home");
+      printf("ok ab home\r\n");
+      ab_home_motion_start();
+      ab_home_motion_emit_state();
       emit_axis_state(&axes[0]);
       emit_axis_state(&axes[1]);
+      return;
+    }
+
+    if (strcmp(tokens[1], "park") == 0)
+    {
+      if (any_axis_motion_busy() != 0U)
+      {
+        uart_write_line("err ab busy");
+        return;
+      }
+      a_axis_motion_get_snapshot(&a_snapshot);
+      b_axis_motion_get_snapshot(&b_snapshot);
+
+      axes[0].enabled = 1U;
+      axes[1].enabled = 1U;
+      apply_axis_enable_state();
+      a_axis_motion_set_enabled(1U);
+      b_axis_motion_set_enabled(1U);
+
+      a_axis_motion_stop();
+      b_axis_motion_stop();
+      coord_motion_stop();
+
+      if (!a_snapshot.homed || !b_snapshot.homed)
+      {
+        uart_write_line("err ab not_homed");
+        return;
+      }
+
+      if (coord_motion_start(0, 0) == 0U)
+      {
+        return;
+      }
+      ab_schedule_auto_stop("ab park");
+      uart_write_line("ok ab park");
+      coord_motion_emit_state();
       return;
     }
 
@@ -1574,6 +1754,12 @@ static void process_command_line(char *line)
     a_axis_motion_get_snapshot(&a_snapshot);
     b_axis_motion_get_snapshot(&b_snapshot);
 
+    if (any_axis_motion_busy() != 0U)
+    {
+      uart_write_line("err ab busy");
+      return;
+    }
+
     axes[0].enabled = 1U;
     axes[1].enabled = 1U;
     apply_axis_enable_state();
@@ -1584,6 +1770,12 @@ static void process_command_line(char *line)
     b_axis_motion_stop();
     coord_motion_stop();
 
+    if (!a_snapshot.homed || !b_snapshot.homed)
+    {
+      uart_write_line("err ab not_homed");
+      return;
+    }
+
     if (strcmp(tokens[1], "goto") == 0)
     {
       a_target = (int32_t)strtol(tokens[2], NULL, 10);
@@ -1592,6 +1784,7 @@ static void process_command_line(char *line)
       {
         return;
       }
+      ab_clear_auto_stop("ab goto");
       printf("ok ab goto %ld %ld\r\n", (long)a_target, (long)b_target);
       coord_motion_emit_state();
       return;
@@ -1605,6 +1798,7 @@ static void process_command_line(char *line)
       {
         return;
       }
+      ab_clear_auto_stop("ab move");
       printf("ok ab move %ld %ld\r\n",
              (long)(a_target - a_snapshot.position),
              (long)(b_target - b_snapshot.position));
@@ -2231,6 +2425,11 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[2], "home") == 0)
     {
+      if (any_axis_motion_busy() != 0U)
+      {
+        printf("err axis %s busy\r\n", axis->key);
+        return;
+      }
       if (axes[0].enabled == 0U || axes[1].enabled == 0U)
       {
         axes[0].enabled = 1U;
@@ -2254,6 +2453,11 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[2], "scan") == 0)
     {
+      if (any_axis_motion_busy() != 0U)
+      {
+        printf("err axis %s busy\r\n", axis->key);
+        return;
+      }
       if (axes[0].enabled == 0U || axes[1].enabled == 0U)
       {
         axes[0].enabled = 1U;
@@ -2280,11 +2484,18 @@ static void process_command_line(char *line)
       if (axis_is_a)
       {
         a_axis_motion_stop();
+        a_axis_motion_set_position(axes[0].position, 0U);
       }
       else
       {
         b_axis_motion_stop();
+        b_axis_motion_set_position(axes[1].position, 0U);
       }
+      axes[0].enabled = 0U;
+      axes[1].enabled = 0U;
+      a_axis_motion_set_enabled(0U);
+      b_axis_motion_set_enabled(0U);
+      apply_axis_enable_state();
       printf("ok axis %s stop\r\n", axis->key);
       emit_axis_state(axis);
       return;
@@ -2349,6 +2560,11 @@ static void process_command_line(char *line)
 
     if (strcmp(tokens[2], "jog") == 0)
     {
+      if (any_axis_motion_busy() != 0U)
+      {
+        printf("err axis %s busy\r\n", axis->key);
+        return;
+      }
       if (token_count < 4U)
       {
         uart_write_line("err missing jog direction");
@@ -2380,6 +2596,11 @@ static void process_command_line(char *line)
     if (strcmp(tokens[2], "move") == 0)
     {
       long delta = 0;
+      if (any_axis_motion_busy() != 0U)
+      {
+        printf("err axis %s busy\r\n", axis->key);
+        return;
+      }
       if (token_count < 4U)
       {
         uart_write_line("err missing move delta");
@@ -2417,6 +2638,11 @@ static void process_command_line(char *line)
     if (strcmp(tokens[2], "goto") == 0)
     {
       long target = 0;
+      if (any_axis_motion_busy() != 0U)
+      {
+        printf("err axis %s busy\r\n", axis->key);
+        return;
+      }
       if (token_count < 4U)
       {
         uart_write_line("err missing goto target");
@@ -2548,11 +2774,23 @@ static void process_command_line(char *line)
     if (axis->key[0] == 'b' && axis->key[1] == '\0')
     {
       b_axis_motion_stop();
+      b_axis_motion_set_position(axes[1].position, 0U);
+      axes[0].enabled = 0U;
+      axes[1].enabled = 0U;
+      a_axis_motion_set_enabled(0U);
+      b_axis_motion_set_enabled(0U);
+      apply_axis_enable_state();
       printf("ok axis %s stop\r\n", axis->key);
       emit_axis_state(axis);
       return;
     }
     axis_stop_motion(axis);
+    a_axis_motion_set_position(axes[0].position, 0U);
+    axes[0].enabled = 0U;
+    axes[1].enabled = 0U;
+    a_axis_motion_set_enabled(0U);
+    b_axis_motion_set_enabled(0U);
+    apply_axis_enable_state();
     printf("ok axis %s stop\r\n", axis->key);
     emit_axis_state(axis);
     return;
@@ -2764,6 +3002,251 @@ static void coord_motion_stop(void)
   HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
 }
 
+static void ab_disable_axes_and_emit(const char *event_line)
+{
+  AAxisMotionSnapshot a_snapshot;
+  BAxisMotionSnapshot b_snapshot;
+
+  a_axis_motion_get_snapshot(&a_snapshot);
+  b_axis_motion_get_snapshot(&b_snapshot);
+
+  coord_motion_stop();
+  a_axis_motion_stop();
+  b_axis_motion_stop();
+  a_axis_motion_set_position(a_snapshot.position, 0U);
+  b_axis_motion_set_position(b_snapshot.position, 0U);
+  axes[0].enabled = 0U;
+  axes[1].enabled = 0U;
+  a_axis_motion_set_enabled(0U);
+  b_axis_motion_set_enabled(0U);
+  apply_axis_enable_state();
+  ab_clear_auto_stop("ab disable");
+  if (event_line != NULL && event_line[0] != '\0')
+  {
+    uart_write_line(event_line);
+  }
+  coord_motion_emit_state();
+  emit_axis_state(&axes[0]);
+  emit_axis_state(&axes[1]);
+}
+
+static uint8_t ab_home_motion_active(void)
+{
+  return ab_home_motion.active;
+}
+
+static void ab_home_motion_stop(void)
+{
+  HAL_TIM_Base_Stop_IT(&htim6);
+  ab_home_motion.active = 0U;
+  ab_home_motion.pulse_high_phase = 0U;
+  ab_home_motion.a_step_pending = 0U;
+  ab_home_motion.b_step_pending = 0U;
+  HAL_GPIO_WritePin(A_STEP_GPIO_Port, A_STEP_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+}
+
+static void ab_home_motion_emit_state(void)
+{
+  printf("ab active %s pos_a %ld target_a %ld pos_b %ld target_b %ld steps_done 0 steps_total 0 interval_us %lu cruise_us 0 start_us 0\r\n",
+         ab_home_motion.active ? "on" : "off",
+         (long)axes[0].position,
+         (long)axes[0].target,
+         (long)axes[1].position,
+         (long)axes[1].target,
+         (unsigned long)AB_HOME_BASE_INTERVAL_US);
+}
+
+static void ab_home_motion_start(void)
+{
+  AAxisMotionSnapshot a_snapshot;
+  BAxisMotionSnapshot b_snapshot;
+
+  a_axis_motion_get_snapshot(&a_snapshot);
+  b_axis_motion_get_snapshot(&b_snapshot);
+
+  coord_motion_stop();
+  a_axis_motion_stop();
+  b_axis_motion_stop();
+
+  axes[0].enabled = 1U;
+  axes[1].enabled = 1U;
+  apply_axis_enable_state();
+  a_axis_motion_set_enabled(1U);
+  b_axis_motion_set_enabled(1U);
+
+  axes[0].position = a_snapshot.position;
+  axes[0].target = a_snapshot.position;
+  axes[0].homed = 0U;
+  axes[0].moving = 1U;
+  axes[0].velocity = axis_min_endstop_triggered(&axes[0]) ? 1 : -1;
+  axes[0].homing_state = axis_min_endstop_triggered(&axes[0]) ? 2U : 1U;
+
+  axes[1].position = b_snapshot.position;
+  axes[1].target = b_snapshot.position;
+  axes[1].homed = 0U;
+  axes[1].moving = 1U;
+  axes[1].velocity = axis_min_endstop_triggered(&axes[1]) ? 1 : -1;
+  axes[1].homing_state = axis_min_endstop_triggered(&axes[1]) ? 2U : 1U;
+
+  ab_home_motion.active = 1U;
+  ab_home_motion.pulse_high_phase = 0U;
+  ab_home_motion.a_step_pending = 0U;
+  ab_home_motion.b_step_pending = 0U;
+  ab_home_motion.a_interval_us = axes[0].homing_interval_us;
+  /* Dual-home on shared TIM6 needs a gentler B profile than single-axis home. */
+  ab_home_motion.b_interval_us = (axes[1].homing_interval_us < AB_HOME_B_INTERVAL_US)
+                                   ? AB_HOME_B_INTERVAL_US
+                                   : axes[1].homing_interval_us;
+  ab_home_motion.a_countdown_us = ab_home_motion.a_interval_us;
+  ab_home_motion.b_countdown_us = ab_home_motion.b_interval_us;
+
+  HAL_GPIO_WritePin(A_DIR_GPIO_Port, A_DIR_Pin, ab_home_a_dir_level(axes[0].velocity));
+  HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, ab_home_b_dir_level(axes[1].velocity));
+
+  __HAL_TIM_SET_AUTORELOAD(&htim6, (AB_HOME_BASE_INTERVAL_US > AB_HOME_STEP_PULSE_HIGH_US)
+                                    ? (AB_HOME_BASE_INTERVAL_US - AB_HOME_STEP_PULSE_HIGH_US)
+                                    : 10U);
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
+  HAL_TIM_Base_Start_IT(&htim6);
+}
+
+static void ab_home_motion_irq(void)
+{
+  uint8_t a_done;
+  uint8_t b_done;
+
+  if (ab_home_motion.active == 0U)
+  {
+    ab_home_motion_stop();
+    return;
+  }
+
+  if (ab_home_motion.pulse_high_phase != 0U)
+  {
+    HAL_GPIO_WritePin(A_STEP_GPIO_Port, A_STEP_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_RESET);
+
+    if (ab_home_motion.a_step_pending != 0U)
+    {
+      axes[0].position += axes[0].velocity;
+      axes[0].target = axes[0].position;
+    }
+    if (ab_home_motion.b_step_pending != 0U)
+    {
+      axes[1].position += axes[1].velocity;
+      axes[1].target = axes[1].position;
+    }
+
+    ab_home_motion.a_step_pending = 0U;
+    ab_home_motion.b_step_pending = 0U;
+    ab_home_motion.pulse_high_phase = 0U;
+
+    __HAL_TIM_SET_AUTORELOAD(&htim6, (AB_HOME_BASE_INTERVAL_US > AB_HOME_STEP_PULSE_HIGH_US)
+                                      ? (AB_HOME_BASE_INTERVAL_US - AB_HOME_STEP_PULSE_HIGH_US)
+                                      : 10U);
+    __HAL_TIM_SET_COUNTER(&htim6, 0U);
+    return;
+  }
+
+  if (axes[0].homing_state == 1U && axis_min_endstop_triggered(&axes[0]) != 0U)
+  {
+    axes[0].homing_state = 2U;
+    axes[0].velocity = 1;
+    axes[0].target = axes[0].position;
+    ab_home_motion.a_countdown_us = ab_home_motion.a_interval_us;
+  }
+  else if (axes[0].homing_state == 2U && axis_min_endstop_triggered(&axes[0]) == 0U)
+  {
+    axes[0].homing_state = 0U;
+    axes[0].homed = 1U;
+    axes[0].moving = 0U;
+    axes[0].velocity = 0;
+    axes[0].position = 0;
+    axes[0].target = 0;
+  }
+
+  if (axes[1].homing_state == 1U && axis_min_endstop_triggered(&axes[1]) != 0U)
+  {
+    axes[1].homing_state = 2U;
+    axes[1].velocity = 1;
+    axes[1].target = axes[1].position;
+    ab_home_motion.b_countdown_us = ab_home_motion.b_interval_us;
+  }
+  else if (axes[1].homing_state == 2U && axis_min_endstop_triggered(&axes[1]) == 0U)
+  {
+    axes[1].homing_state = 0U;
+    axes[1].homed = 1U;
+    axes[1].moving = 0U;
+    axes[1].velocity = 0;
+    axes[1].position = 0;
+    axes[1].target = 0;
+  }
+
+  a_done = (axes[0].homing_state == 0U);
+  b_done = (axes[1].homing_state == 0U);
+
+  if (a_done != 0U && b_done != 0U)
+  {
+    a_axis_motion_set_position(0, 1U);
+    b_axis_motion_set_position(0, 1U);
+    ab_home_motion_stop();
+    uart_write_line("ok ab homed");
+    ab_home_motion_emit_state();
+    emit_axis_state(&axes[0]);
+    emit_axis_state(&axes[1]);
+    return;
+  }
+
+  if (a_done == 0U)
+  {
+    if (ab_home_motion.a_countdown_us <= AB_HOME_BASE_INTERVAL_US)
+    {
+      HAL_GPIO_WritePin(A_DIR_GPIO_Port, A_DIR_Pin, ab_home_a_dir_level(axes[0].velocity));
+      ab_home_motion.a_step_pending = 1U;
+      ab_home_motion.a_countdown_us = ab_home_motion.a_interval_us;
+    }
+    else
+    {
+      ab_home_motion.a_countdown_us -= AB_HOME_BASE_INTERVAL_US;
+    }
+  }
+
+  if (b_done == 0U)
+  {
+    if (ab_home_motion.b_countdown_us <= AB_HOME_BASE_INTERVAL_US)
+    {
+      HAL_GPIO_WritePin(B_DIR_GPIO_Port, B_DIR_Pin, ab_home_b_dir_level(axes[1].velocity));
+      ab_home_motion.b_step_pending = 1U;
+      ab_home_motion.b_countdown_us = ab_home_motion.b_interval_us;
+    }
+    else
+    {
+      ab_home_motion.b_countdown_us -= AB_HOME_BASE_INTERVAL_US;
+    }
+  }
+
+  if (ab_home_motion.a_step_pending != 0U)
+  {
+    HAL_GPIO_WritePin(A_STEP_GPIO_Port, A_STEP_Pin, GPIO_PIN_SET);
+  }
+  if (ab_home_motion.b_step_pending != 0U)
+  {
+    HAL_GPIO_WritePin(B_STEP_GPIO_Port, B_STEP_Pin, GPIO_PIN_SET);
+  }
+
+  if (ab_home_motion.a_step_pending != 0U || ab_home_motion.b_step_pending != 0U)
+  {
+    ab_home_motion.pulse_high_phase = 1U;
+    __HAL_TIM_SET_AUTORELOAD(&htim6, AB_HOME_STEP_PULSE_HIGH_US);
+  }
+  else
+  {
+    __HAL_TIM_SET_AUTORELOAD(&htim6, AB_HOME_BASE_INTERVAL_US);
+  }
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
+}
+
 static void coord_motion_emit_state(void)
 {
   printf("ab active %s pos_a %ld target_a %ld pos_b %ld target_b %ld steps_done %lu steps_total %lu interval_us %lu cruise_us %lu start_us %lu\r\n",
@@ -2835,6 +3318,11 @@ static uint8_t coord_motion_start(int32_t a_target, int32_t b_target)
   BAxisMotionSnapshot b_snapshot;
   uint32_t a_abs_steps;
   uint32_t b_abs_steps;
+  uint32_t start_speed_q16;
+  uint32_t cruise_speed_q16;
+  uint32_t accel_steps;
+  uint64_t speed_delta_sq;
+  uint64_t accel_steps_q16;
 
   a_axis_motion_get_snapshot(&a_snapshot);
   b_axis_motion_get_snapshot(&b_snapshot);
@@ -2865,6 +3353,8 @@ static uint8_t coord_motion_start(int32_t a_target, int32_t b_target)
   coord_motion.b_abs_steps = b_abs_steps;
   coord_motion.steps_total = (a_abs_steps > b_abs_steps) ? a_abs_steps : b_abs_steps;
   coord_motion.steps_done = 0U;
+  coord_motion.accel_until_step = 0U;
+  coord_motion.decel_after_step = 0U;
   coord_motion.a_err = 0U;
   coord_motion.b_err = 0U;
   coord_motion.a_step_pending = 0U;
@@ -2880,6 +3370,30 @@ static uint8_t coord_motion_start(int32_t a_target, int32_t b_target)
   coord_motion.cruise_interval_us = AB_COORD_CRUISE_INTERVAL_US;
   coord_motion.start_interval_us = AB_COORD_START_INTERVAL_US;
   coord_motion.accel_delta_us = AB_COORD_ACCEL_DELTA_US;
+  start_speed_q16 = (uint32_t)(((uint64_t)1000000U << 16) / coord_motion.start_interval_us);
+  cruise_speed_q16 = (uint32_t)(((uint64_t)1000000U << 16) / coord_motion.cruise_interval_us);
+  coord_motion.start_speed_q16 = start_speed_q16;
+  coord_motion.cruise_speed_q16 = cruise_speed_q16;
+  coord_motion.current_speed_q16 = start_speed_q16;
+  coord_motion.accel_q16 = AB_COORD_ACCEL_STEPS_PER_S2 << 16;
+
+  accel_steps = 0U;
+  if (coord_motion.accel_q16 > 0U && cruise_speed_q16 > start_speed_q16)
+  {
+    speed_delta_sq = ((uint64_t)cruise_speed_q16 * (uint64_t)cruise_speed_q16) -
+                     ((uint64_t)start_speed_q16 * (uint64_t)start_speed_q16);
+    accel_steps_q16 = (speed_delta_sq + (2ULL * (uint64_t)coord_motion.accel_q16) - 1ULL) /
+                      (2ULL * (uint64_t)coord_motion.accel_q16);
+    accel_steps = (uint32_t)((accel_steps_q16 + 0xFFFFULL) >> 16);
+  }
+
+  if ((uint64_t)accel_steps * 2ULL >= (uint64_t)coord_motion.steps_total)
+  {
+    accel_steps = coord_motion.steps_total / 2U;
+  }
+
+  coord_motion.accel_until_step = accel_steps;
+  coord_motion.decel_after_step = coord_motion.steps_total - accel_steps;
 
   coord_motion.current_interval_us = coord_motion.start_interval_us;
   coord_motion.active = 1U;
@@ -2903,6 +3417,31 @@ static void coord_motion_irq(void)
 
   if (coord_motion.pulse_high_phase == 0U)
   {
+    if (coord_motion.a_direction < 0 && axis_min_endstop_triggered(&axes[0]) != 0U)
+    {
+      uart_write_line("err ab endstop a_min");
+      ab_disable_axes_and_emit("ok ab stop");
+      return;
+    }
+    if (coord_motion.a_direction > 0 && axis_max_endstop_triggered(&axes[0]) != 0U)
+    {
+      uart_write_line("err ab endstop a_max");
+      ab_disable_axes_and_emit("ok ab stop");
+      return;
+    }
+    if (coord_motion.b_direction < 0 && axis_min_endstop_triggered(&axes[1]) != 0U)
+    {
+      uart_write_line("err ab endstop b_min");
+      ab_disable_axes_and_emit("ok ab stop");
+      return;
+    }
+    if (coord_motion.b_direction > 0 && axis_max_endstop_triggered(&axes[1]) != 0U)
+    {
+      uart_write_line("err ab endstop b_max");
+      ab_disable_axes_and_emit("ok ab stop");
+      return;
+    }
+
     coord_motion.a_step_pending = 0U;
     coord_motion.b_step_pending = 0U;
 
@@ -2953,47 +3492,56 @@ static void coord_motion_irq(void)
 
   coord_motion.steps_done++;
   {
-    uint32_t remaining_steps = (coord_motion.steps_done >= coord_motion.steps_total)
-                                 ? 0U
-                                 : (coord_motion.steps_total - coord_motion.steps_done);
-    uint32_t ramp_steps = coord_motion.steps_total / 11U;
-    uint32_t ramp_span = (coord_motion.start_interval_us > coord_motion.cruise_interval_us)
-                           ? (coord_motion.start_interval_us - coord_motion.cruise_interval_us)
-                           : 0U;
+    uint32_t next_speed_q16 = coord_motion.current_speed_q16;
 
-    if (ramp_steps < AB_COORD_MIN_RAMP_STEPS)
+    if (coord_motion.steps_done >= coord_motion.decel_after_step)
     {
-      ramp_steps = AB_COORD_MIN_RAMP_STEPS;
+      if (coord_motion.accel_q16 > 0U && coord_motion.current_speed_q16 > coord_motion.start_speed_q16)
+      {
+        uint64_t dv_q16 = ((uint64_t)coord_motion.accel_q16 << 16) / (uint64_t)coord_motion.current_speed_q16;
+        if (dv_q16 >= (uint64_t)(coord_motion.current_speed_q16 - coord_motion.start_speed_q16))
+        {
+          next_speed_q16 = coord_motion.start_speed_q16;
+        }
+        else
+        {
+          next_speed_q16 = coord_motion.current_speed_q16 - (uint32_t)dv_q16;
+        }
+      }
+      else
+      {
+        next_speed_q16 = coord_motion.start_speed_q16;
+      }
     }
-    if (coord_motion.steps_total > 1U && (ramp_steps * 2U) > coord_motion.steps_total)
+    else if (coord_motion.steps_done < coord_motion.accel_until_step &&
+             coord_motion.current_speed_q16 < coord_motion.cruise_speed_q16)
     {
-      ramp_steps = coord_motion.steps_total / 2U;
+      if (coord_motion.accel_q16 > 0U)
+      {
+        uint64_t dv_q16 = ((uint64_t)coord_motion.accel_q16 << 16) / (uint64_t)coord_motion.current_speed_q16;
+        next_speed_q16 = coord_motion.current_speed_q16 + (uint32_t)dv_q16;
+        if (next_speed_q16 > coord_motion.cruise_speed_q16)
+        {
+          next_speed_q16 = coord_motion.cruise_speed_q16;
+        }
+      }
+      else
+      {
+        next_speed_q16 = coord_motion.cruise_speed_q16;
+      }
     }
 
-    if (ramp_steps == 0U || ramp_span == 0U)
+    if (next_speed_q16 < coord_motion.start_speed_q16)
     {
-      coord_motion.current_interval_us = coord_motion.cruise_interval_us;
+      next_speed_q16 = coord_motion.start_speed_q16;
     }
-    else if (coord_motion.steps_done < ramp_steps)
+    else if (next_speed_q16 > coord_motion.cruise_speed_q16)
     {
-      coord_motion.current_interval_us =
-        coord_motion_ease_interval(coord_motion.steps_done,
-                                   ramp_steps,
-                                   coord_motion.start_interval_us,
-                                   coord_motion.cruise_interval_us);
+      next_speed_q16 = coord_motion.cruise_speed_q16;
     }
-    else if (remaining_steps < ramp_steps)
-    {
-      coord_motion.current_interval_us =
-        coord_motion_ease_interval(remaining_steps,
-                                   ramp_steps,
-                                   coord_motion.start_interval_us,
-                                   coord_motion.cruise_interval_us);
-    }
-    else
-    {
-      coord_motion.current_interval_us = coord_motion.cruise_interval_us;
-    }
+
+    coord_motion.current_speed_q16 = next_speed_q16;
+    coord_motion.current_interval_us = (uint32_t)(((uint64_t)1000000U << 16) / coord_motion.current_speed_q16);
   }
   coord_motion.pulse_high_phase = 0U;
   __HAL_TIM_SET_AUTORELOAD(&htim6, (coord_motion.current_interval_us > 5U) ? (coord_motion.current_interval_us - 5U) : 10U);
@@ -3004,6 +3552,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM6)
   {
+    if (ab_home_motion_active() != 0U)
+    {
+      ab_home_motion_irq();
+      return;
+    }
     if (coord_motion_active() != 0U)
     {
       coord_motion_irq();
@@ -3050,6 +3603,7 @@ int main(void)
   printf("\r\nSTM32G431RB #02 boot host_uart=USART1 tmc_uart=USART3 driver_a=%u driver_b=%u\r\n",
          (unsigned)axes[0].driver_addr,
          (unsigned)axes[1].driver_addr);
+  uart_write_line("fw ab_auto_stop_trace_v1");
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   DWT->CYCCNT = 0U;
@@ -3093,53 +3647,78 @@ int main(void)
   b_axis_motion_set_cruise_interval(axes[1].cruise_interval_us);
   b_axis_motion_set_homing_interval(axes[1].homing_interval_us);
   b_axis_motion_set_accel_delta(axes[1].accel_interval_delta_us);
-  host_uart_rx_start();
   tmc_uart_rx_start();
-
-  while (1)
+  host_uart_rx_start();
   {
-    static char rx_line[96];
-    static size_t rx_len = 0U;
-    static uint32_t last_led_toggle_ms = 0U;
-    const uint32_t now_ms = HAL_GetTick();
+    uint8_t tmc_defaults_pending = 1U;
+    uint32_t tmc_defaults_deadline_ms = HAL_GetTick() + 500U;
 
-    host_uart_clear_errors();
-
-    while (host_rx_tail != host_rx_head)
+    while (1)
     {
-      uint8_t rx_byte = host_rx_ring[host_rx_tail];
-      host_rx_tail = (uint16_t)((host_rx_tail + 1U) % (sizeof(host_rx_ring) / sizeof(host_rx_ring[0])));
-      if (rx_byte == '\r' || rx_byte == '\n')
+      static char rx_line[96];
+      static size_t rx_len = 0U;
+      static uint32_t last_led_toggle_ms = 0U;
+      const uint32_t now_ms = HAL_GetTick();
+
+      host_uart_clear_errors();
+
+      if (tmc_defaults_pending != 0U && (int32_t)(now_ms - tmc_defaults_deadline_ms) >= 0)
       {
-        if (rx_len > 0U)
+        tmc_apply_runtime_defaults();
+        tmc_defaults_pending = 0U;
+      }
+
+      while (host_rx_tail != host_rx_head)
+      {
+        uint8_t rx_byte = host_rx_ring[host_rx_tail];
+        host_rx_tail = (uint16_t)((host_rx_tail + 1U) % (sizeof(host_rx_ring) / sizeof(host_rx_ring[0])));
+        if (rx_byte == '\r' || rx_byte == '\n')
         {
-          printf("cmd %.*s\r\n", (int)rx_len, rx_line);
-          rx_line[rx_len] = '\0';
-          process_command_line(rx_line);
+          if (rx_len > 0U)
+          {
+            printf("cmd %.*s\r\n", (int)rx_len, rx_line);
+            rx_line[rx_len] = '\0';
+            process_command_line(rx_line);
+            rx_len = 0U;
+          }
+        }
+        else if (rx_len < (sizeof(rx_line) - 1U))
+        {
+          rx_line[rx_len++] = (char)rx_byte;
+        }
+        else
+        {
           rx_len = 0U;
+          uart_write_line("err command too long");
         }
       }
-      else if (rx_len < (sizeof(rx_line) - 1U))
-      {
-        rx_line[rx_len++] = (char)rx_byte;
-      }
-      else
-      {
-        rx_len = 0U;
-        uart_write_line("err command too long");
-      }
-    }
 
-    tick_axes();
-    a_axis_motion_update();
-    b_axis_motion_update();
-    tick_byj_steppers();
-    servo_tick();
+      tick_axes();
+      a_axis_motion_update();
+      b_axis_motion_update();
+      tick_byj_steppers();
+      servo_tick();
 
-    if (now_ms - last_led_toggle_ms >= 250U)
-    {
-      HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
-      last_led_toggle_ms = now_ms;
+      if (ab_auto_stop_armed != 0U
+          && ab_auto_stop_deadline_ms != 0U
+          && ab_home_motion_active() == 0U
+          && coord_motion_active() == 0U
+          && a_axis_motion_active() == 0U
+          && b_axis_motion_active() == 0U
+          && (int32_t)(now_ms - ab_auto_stop_deadline_ms) >= 0)
+      {
+        printf("ab auto_stop fire src %s now_ms %lu deadline_ms %lu\r\n",
+               ab_auto_stop_reason,
+               (unsigned long)now_ms,
+               (unsigned long)ab_auto_stop_deadline_ms);
+        ab_disable_axes_and_emit("ok ab auto_stop");
+      }
+
+      if (now_ms - last_led_toggle_ms >= 250U)
+      {
+        HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+        last_led_toggle_ms = now_ms;
+      }
     }
   }
 }

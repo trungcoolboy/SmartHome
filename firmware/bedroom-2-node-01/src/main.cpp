@@ -56,6 +56,7 @@ constexpr unsigned long kTouchReleaseDebounceMs = 200;
 constexpr unsigned long kTouchRetriggerGuardMs = 2500;
 constexpr unsigned long kTouchIgnoreAfterRelayMs = 2500;
 constexpr unsigned long kTouchRearmReleaseStableMs = 600;
+constexpr bool kTouchControlEnabled = false;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -464,6 +465,17 @@ void init_gpio() {
 }
 
 void poll_touch() {
+  if (!kTouchControlEnabled) {
+    if (touch_active) {
+      touch_active = false;
+      touch_release_stable_since_ms = millis();
+      touch_armed = true;
+      telemetry_dirty = true;
+    }
+    last_touch_raw = false;
+    return;
+  }
+
   const unsigned long now = millis();
   const bool raw = read_touch_active();
 

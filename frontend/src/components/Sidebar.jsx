@@ -21,12 +21,6 @@ function Sidebar({ activePage, onNavigate }) {
           </button>
         ))}
       </nav>
-
-      <div className="system-panel">
-        <span className="panel-label">System Status</span>
-        <strong>Ubuntu Server Online</strong>
-        <p>MQTT, serial bridge and realtime services are centralized here.</p>
-      </div>
     </aside>
   );
 }

@@ -10,6 +10,8 @@ function ABWorkspaceMap({
   selectedAMarker,
   selectedBMarker,
   onSelect,
+  onApply,
+  selectedState = "idle",
 }) {
   const mapRef = React.useRef(null);
   const [hoverPoint, setHoverPoint] = React.useState(null);
@@ -35,6 +37,8 @@ function ABWorkspaceMap({
       bTargetMm,
       left: normalizedX * 100,
       top: normalizedY * 100,
+      xRatio: normalizedX,
+      yRatio: normalizedY,
     };
   }
 
@@ -77,6 +81,9 @@ function ABWorkspaceMap({
       <div
         ref={mapRef}
         className="ab-workspace-map ab-workspace-map-surface"
+        style={{
+          aspectRatio: `${Math.max(aTravelMm, 1)} / ${Math.max(bTravelMm, 1)}`,
+        }}
         role="img"
         aria-label="AB workspace map"
         onPointerMove={(event) => handleHover(event.clientX, event.clientY)}
@@ -113,30 +120,39 @@ function ABWorkspaceMap({
                 setLocalSelectedPoint(cell);
                 onSelect?.({ aTargetMm: cell.aTargetMm, bTargetMm: cell.bTargetMm });
               }}
+              onDoubleClick={() => {
+                setLocalSelectedPoint(cell);
+                onSelect?.({ aTargetMm: cell.aTargetMm, bTargetMm: cell.bTargetMm });
+                onApply?.({ aTargetMm: cell.aTargetMm, bTargetMm: cell.bTargetMm });
+              }}
             />
           ))}
         </div>
         {hoverPoint ? (
           <div
             className="ab-workspace-hover-tooltip"
-            style={{ left: `${hoverPoint.left}%`, top: `${hoverPoint.top}%` }}
+            style={{
+              left: hoverPoint.xRatio > 0.72 ? "auto" : `${hoverPoint.left}%`,
+              right: hoverPoint.xRatio > 0.72 ? `${100 - hoverPoint.left}%` : "auto",
+              top: hoverPoint.yRatio > 0.82 ? "auto" : `${hoverPoint.top}%`,
+              bottom: hoverPoint.yRatio > 0.82 ? `${100 - hoverPoint.top}%` : "auto",
+              transform: `${
+                hoverPoint.xRatio > 0.72 ? "translate(-12px, 0)" : "translate(12px, 0)"
+              } ${
+                hoverPoint.yRatio > 0.82 ? "translateY(-12px)" : "translateY(-50%)"
+              }`,
+            }}
           >
             A {hoverPoint.aTargetMm} mm / B {hoverPoint.bTargetMm} mm
           </div>
         ) : null}
-        {localSelectedPoint ? (
-          <div className="ab-workspace-last-selected">
-            Last selected: A {localSelectedPoint.aTargetMm} mm / B {localSelectedPoint.bTargetMm} mm
-          </div>
-        ) : null}
-
         <div
           className="ab-workspace-marker ab-workspace-target-marker"
           style={{ left: `${targetAMarker}%`, top: `${100 - targetBMarker}%` }}
         />
         {visibleSelectedLeft != null && visibleSelectedTop != null ? (
           <div
-            className="ab-workspace-marker ab-workspace-selected-marker"
+            className={`ab-workspace-marker ab-workspace-selected-marker ab-workspace-selected-marker-${selectedState}`}
             style={{ left: `${visibleSelectedLeft}%`, top: `${visibleSelectedTop}%` }}
           />
         ) : null}

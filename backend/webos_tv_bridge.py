@@ -310,6 +310,12 @@ class WebOsTvBridge:
         app_id = app_payload.get("appId")
         now = time.time()
         with self.state.lock:
+            was_reachable = self.state.reachable
+            should_reset_started_at = (
+                app_id != self.state.foreground_app_id
+                or not was_reachable
+                or self.state.foreground_app_started_at is None
+            )
             self.state.reachable = True
             self.state.paired = True
             self.state.pairing_pending = False
@@ -317,7 +323,7 @@ class WebOsTvBridge:
             self.state.last_seen = now
             self.state.volume = volume_payload.get("volume")
             self.state.muted = volume_payload.get("muted")
-            if app_id != self.state.foreground_app_id:
+            if should_reset_started_at:
                 self.state.foreground_app_started_at = now if app_id else None
             self.state.foreground_app_id = app_id
             self.state.inputs = inputs_payload.get("devices", [])

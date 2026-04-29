@@ -114,7 +114,7 @@ export const pageContent = {
     featuredDevice: {
       eyebrow: "Connected Device",
       kind: "LG webOS TV",
-      name: "Living Room TV",
+      name: "TV",
       address: "192.168.1.52",
       apiPath: "/api/tv/living-room",
       connectivity: "Waiting for bridge status",
@@ -179,6 +179,9 @@ export const pageContent = {
         { key: "candle", label: "Candle" },
       ],
     },
+    switchPanel: {
+      title: "Switch",
+    },
     highlights: [],
   },
   "bedroom-1": {
@@ -206,6 +209,9 @@ export const pageContent = {
     title: "Secondary bedroom controls with simple lighting and comfort states.",
     description:
       "This page should stay lightweight and fast, showing only the toggles and environment signals needed for daily use.",
+    switchPanel: {
+      title: "Switch",
+    },
     roomNode: {
       title: "Bedroom 2 Node 01",
       apiPath: "/api/node/bedroom-2-01",
@@ -305,11 +311,11 @@ export const pageContent = {
       apiPath: "/api/stm32/02",
       note: "B-axis motion tuning is exposed here so travel length and near-endstop deceleration can be adjusted without reflashing.",
       bAxisTuning: {
-        defaultATravelSteps: 49983,
-        defaultTravelSteps: 5656,
+        defaultATravelSteps: 49792,
+        defaultTravelSteps: 22593,
         defaultDecelWindowSteps: 300,
         aMmPerStep: 0.0125,
-        bMmPerStep: 0.05,
+        bMmPerStep: 0.0125,
       },
     },
     pumpControl: {
@@ -383,7 +389,15 @@ export const pageContent = {
     eyebrow: "Settings",
     title: "Pinouts",
     description: "",
-    deviceStrip: [{ id: "pinouts", label: "Pinouts", icon: "control" }],
+    deviceStrip: [
+      { id: "upload", label: "Upload", icon: "control" },
+      { id: "pinouts", label: "Pinouts", icon: "control" },
+    ],
+    uploadPanel: {
+      title: "File Upload",
+      apiPath: "/api/uploads",
+      note: "Drop an image or any reference file here, then send me the saved path from the list below if needed.",
+    },
     pinoutsCard: {
       title: "Pinouts",
       sections: [

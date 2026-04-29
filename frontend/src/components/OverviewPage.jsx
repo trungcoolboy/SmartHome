@@ -255,7 +255,6 @@ function OverviewPage({ onNavigate }) {
           : `${derived.connectedBoards}/${derived.totalBoards || 3} STM32 bridge(s) currently linked.`,
     },
   ];
-
   return (
     <>
       <section className="hero-card">

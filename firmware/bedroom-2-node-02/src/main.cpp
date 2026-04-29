@@ -14,6 +14,7 @@ PubSubClient mqtt_client(wifi_client);
 constexpr char kRemoteNode01CommandTopic[] = "smarthome/bedroom-2-node-01/command";
 constexpr char kRemoteNode01StateTopic[] = "smarthome/bedroom-2-node-01/state";
 constexpr char kRemoteNode01TelemetryTopic[] = "smarthome/bedroom-2-node-01/telemetry";
+constexpr bool kRemoteControlEnabled = false;
 
 bool touch_active = false;
 bool last_touch_raw = false;
@@ -42,7 +43,9 @@ constexpr unsigned long kTouchPressDebounceMs = 450;
 constexpr unsigned long kTouchReleaseDebounceMs = 200;
 constexpr unsigned long kTouchRetriggerGuardMs = 2500;
 constexpr unsigned long kTouchIgnoreAfterToggleMs = 2500;
+constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 7000;
 constexpr unsigned long kTouchRearmReleaseStableMs = 600;
+constexpr bool kTouchControlEnabled = false;
 
 bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
@@ -138,18 +141,34 @@ void mark_local_action() {
   touch_armed = false;
 }
 
+void suppress_touch_after_remote_sync() {
+  const unsigned long now_ms = millis();
+  last_local_action_ms = now_ms;
+  touch_ignore_until_ms = now_ms + kTouchIgnoreAfterRemoteSyncMs;
+  last_touch_raw = read_touch_active();
+  touch_active = last_touch_raw;
+  last_touch_raw_change_ms = now_ms;
+  touch_release_stable_since_ms = touch_active ? 0 : now_ms;
+  touch_armed = false;
+  update_led();
+}
+
 void set_remote_relay_state(bool value, const char* event, const char* detail = nullptr) {
   if (remote_relay_on == value) {
     update_led();
     return;
   }
   remote_relay_on = value;
+  suppress_touch_after_remote_sync();
   update_led();
   queue_state(event, detail);
   telemetry_dirty = true;
 }
 
 bool publish_remote_toggle() {
+  if (!kRemoteControlEnabled) {
+    return false;
+  }
   if (!mqtt_client.connected()) {
     return false;
   }
@@ -161,6 +180,18 @@ bool publish_remote_toggle() {
 }
 
 void handle_touch() {
+  if (!kTouchControlEnabled) {
+    if (touch_active) {
+      touch_active = false;
+      touch_release_stable_since_ms = millis();
+      touch_armed = true;
+      telemetry_dirty = true;
+      update_led();
+    }
+    last_touch_raw = false;
+    return;
+  }
+
   const bool raw = read_touch_active();
   const unsigned long now_ms = millis();
 
@@ -221,7 +252,7 @@ void handle_touch() {
     if (publish_remote_toggle()) {
       queue_state("remote_toggle_sent");
     } else {
-      queue_state("remote_toggle_failed");
+      queue_state(kRemoteControlEnabled ? "remote_toggle_failed" : "remote_disabled");
     }
     telemetry_dirty = true;
   }
@@ -268,7 +299,7 @@ void handle_command(char* topic, const uint8_t* payload, unsigned int length) {
     if (publish_remote_toggle()) {
       queue_state("remote_toggle_sent", "command");
     } else {
-      queue_state("remote_toggle_failed", "command");
+      queue_state(kRemoteControlEnabled ? "remote_toggle_failed" : "remote_disabled", "command");
     }
     telemetry_dirty = true;
     return;

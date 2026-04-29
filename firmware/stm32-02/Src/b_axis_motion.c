@@ -8,7 +8,7 @@
 #define B_HOME_SEEK_LIMIT_STEPS  50000U
 #define B_HOME_RELEASE_LIMIT     8000U
 #define B_SCAN_MAX_LIMIT_STEPS   60000U
-#define B_SCAN_INTERVAL_US       1000U
+#define B_SCAN_INTERVAL_US       850U
 #define B_DEFAULT_TRAVEL_STEPS   5656U
 #define B_HOME_SEEK_DIRECTION    (-1)
 #define B_HOME_RELEASE_DIRECTION 1
@@ -72,11 +72,11 @@ static BAxisState b_axis = {
   .target = 0,
   .velocity = 0,
   .travel_steps = B_DEFAULT_TRAVEL_STEPS,
-  .decel_window_steps = 300U,
-  .start_interval_us = 2000U,
-  .cruise_interval_us = 100U,
-  .homing_interval_us = 40U,
-  .accel_interval_delta_us = 10U,
+  .decel_window_steps = 160U,
+  .start_interval_us = 900U,
+  .cruise_interval_us = 65U,
+  .homing_interval_us = 850U,
+  .accel_interval_delta_us = 24U,
 };
 
 static BMotionState b_motion = {0};
@@ -203,6 +203,11 @@ static uint32_t b_target_interval_for_position(void)
 {
   uint32_t distance_to_edge;
   uint32_t ramp_span;
+
+  if (b_axis.homing_state != 0U)
+  {
+    return b_motion.interval_us;
+  }
 
   if (b_axis.decel_window_steps == 0U || b_axis.start_interval_us <= b_motion.interval_us)
   {

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import cgi
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -32,6 +34,17 @@ ROOM_NODE_CONFIGS = [
 TV_STALE_AFTER_SECONDS = 20.0
 
 
+def read_system_uptime_seconds() -> float | None:
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as handle:
+            raw = handle.read().strip().split()
+        if not raw:
+            return None
+        return float(raw[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 @dataclass
 class Stm32Runtime:
     route_prefix: str
@@ -39,6 +52,10 @@ class Stm32Runtime:
     bridge: SerialBridge
     sse_hub: SerialSseHub
     event_store: EventStore | None = None
+    cache_lock: threading.Lock = field(default_factory=threading.Lock)
+    cached_status: dict[str, Any] | None = None
+    cached_status_at: float = 0.0
+    cached_logs: dict[int, tuple[float, dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -299,13 +316,16 @@ def start_integrated_tv_probe_loop(
             return
         previous_id = previous_snapshot.get("foregroundAppId")
         current_id = current_snapshot.get("foregroundAppId")
-        if previous_id == current_id:
-            return
         previous_started_at = previous_snapshot.get("foregroundAppStartedAt")
         previous_title = previous_snapshot.get("foregroundAppTitle") or previous_id
         current_title = current_snapshot.get("foregroundAppTitle") or current_id
+        previous_reachable = bool(previous_snapshot.get("reachable"))
+        current_reachable = bool(current_snapshot.get("reachable"))
+        closed_previous_session = False
 
-        if previous_id and previous_started_at:
+        if previous_id and previous_started_at and (
+            previous_id != current_id or (previous_reachable and not current_reachable)
+        ):
             duration_seconds = max(0.0, now - float(previous_started_at))
             event_store.record(
                 source_type="tv",
@@ -321,7 +341,10 @@ def start_integrated_tv_probe_loop(
                 },
                 state=current_snapshot,
             )
-        if current_id:
+            closed_previous_session = True
+        if current_id and current_reachable and (
+            previous_id != current_id or not previous_reachable or closed_previous_session
+        ):
             event_store.record(
                 source_type="tv",
                 source_id=state.tv_id,
@@ -362,24 +385,33 @@ def start_integrated_tv_probe_loop(
                         current_snapshot = build_tv_snapshot(state)
                         _record_app_transition(previous_snapshot, current_snapshot, now)
                     except Exception as exc:
+                        previous_snapshot = build_tv_snapshot(state)
                         with state.lock:
                             state.last_error = str(exc)
                             # Keep cached fields for a grace period, but do not pretend the TV is still reachable.
                             state.reachable = False
                             if not state.last_seen or now - state.last_seen > TV_STALE_AFTER_SECONDS:
                                 state.wake_pending = False
+                        current_snapshot = build_tv_snapshot(state)
+                        _record_app_transition(previous_snapshot, current_snapshot, now)
                 elif not reachable:
+                    previous_snapshot = build_tv_snapshot(state)
                     with state.lock:
                         state.reachable = False
                         if not state.last_seen or now - state.last_seen > TV_STALE_AFTER_SECONDS:
                             state.wake_pending = False
+                    current_snapshot = build_tv_snapshot(state)
+                    _record_app_transition(previous_snapshot, current_snapshot, now)
             except Exception as exc:
                 now = time.time()
+                previous_snapshot = build_tv_snapshot(state)
                 with state.lock:
                     state.last_error = str(exc)
                     state.reachable = False
                     if not state.last_seen or now - state.last_seen > TV_STALE_AFTER_SECONDS:
                         state.wake_pending = False
+                current_snapshot = build_tv_snapshot(state)
+                _record_app_transition(previous_snapshot, current_snapshot, now)
 
             snapshot = build_tv_snapshot(state)
             encoded = json.dumps(_stable_snapshot(snapshot), sort_keys=True, ensure_ascii=True)
@@ -408,6 +440,9 @@ class Handler(BaseHTTPRequestHandler):
     stm32_runtimes: dict[str, Stm32Runtime] = {}
     room_node_runtimes: dict[str, RoomNodeRuntime] = {}
     event_store: EventStore | None = None
+    upload_dir: Path = Path("/tmp")
+    stm32_status_cache_ttl_seconds = 0.5
+    stm32_logs_cache_ttl_seconds = 0.75
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -430,6 +465,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/history":
             self._history()
+            return
+        if parsed.path == "/api/uploads":
+            self._uploads()
             return
 
         if parsed.path.startswith(TV_ROUTE_PREFIX):
@@ -478,7 +516,12 @@ class Handler(BaseHTTPRequestHandler):
                 "status": HTTPStatus.OK,
                 "payload": {"ok": True, "state": runtime.state.snapshot()},
             }
-        return {"ok": True, "services": services}
+        return {
+            "ok": True,
+            "serverTime": time.time(),
+            "serverUptimeSeconds": read_system_uptime_seconds(),
+            "services": services,
+        }
 
     def _resolve_stm32_runtime(self, path: str) -> Stm32Runtime | None:
         for prefix, runtime in self.stm32_runtimes.items():
@@ -525,6 +568,110 @@ class Handler(BaseHTTPRequestHandler):
             event_type=event_type,
         )
         self._json(HTTPStatus.OK, {"items": items})
+
+    def _uploads(self) -> None:
+        if self.command == "GET":
+            self._json(HTTPStatus.OK, {"items": self._list_uploads()})
+            return
+        if self.command == "POST":
+            self._upload_file()
+            return
+        self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
+
+    def _list_uploads(self) -> list[dict[str, Any]]:
+        upload_dir = self.upload_dir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        items: list[dict[str, Any]] = []
+        for path in sorted(upload_dir.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            items.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "size": stat.st_size,
+                    "modifiedAt": stat.st_mtime,
+                }
+            )
+        return items
+
+    def _upload_file(self) -> None:
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "expected multipart/form-data"})
+            return
+
+        try:
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": content_type,
+                    "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+                },
+                keep_blank_values=True,
+            )
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": f"invalid multipart body: {exc}"})
+            return
+
+        file_field = form["file"] if "file" in form else None
+        if file_field is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "missing file field"})
+            return
+        if isinstance(file_field, list):
+            file_field = file_field[0]
+        filename = Path(str(getattr(file_field, "filename", "") or "")).name
+        if not filename:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "missing filename"})
+            return
+        if getattr(file_field, "file", None) is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "empty file payload"})
+            return
+
+        safe_name = self._sanitize_upload_name(filename)
+        upload_dir = self.upload_dir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        destination = self._allocate_upload_path(upload_dir / safe_name)
+
+        try:
+            data = file_field.file.read()
+            destination.write_bytes(data)
+        except Exception as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"failed to save file: {exc}"})
+            return
+
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "item": {
+                    "name": destination.name,
+                    "path": str(destination),
+                    "size": destination.stat().st_size,
+                    "modifiedAt": destination.stat().st_mtime,
+                },
+                "items": self._list_uploads(),
+            },
+        )
+
+    def _sanitize_upload_name(self, filename: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip(".-")
+        return cleaned or f"upload-{int(time.time())}"
+
+    def _allocate_upload_path(self, target: Path) -> Path:
+        if not target.exists():
+            return target
+        stem = target.stem
+        suffix = target.suffix
+        index = 2
+        while True:
+            candidate = target.with_name(f"{stem}-{index}{suffix}")
+            if not candidate.exists():
+                return candidate
+            index += 1
 
     def _handle_tv_request(self, parsed: Any) -> None:
         if parsed.path == f"{TV_ROUTE_PREFIX}/status":
@@ -676,12 +823,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_stm32_request(self, parsed: Any, runtime: Stm32Runtime) -> None:
         if parsed.path == f"{runtime.route_prefix}/status":
-            self._json(HTTPStatus.OK, runtime.state.snapshot())
+            now = time.time()
+            with runtime.cache_lock:
+                if (
+                    runtime.cached_status is None
+                    or now - runtime.cached_status_at >= self.stm32_status_cache_ttl_seconds
+                ):
+                    runtime.cached_status = runtime.state.snapshot()
+                    runtime.cached_status_at = now
+                payload = runtime.cached_status
+            self._json(HTTPStatus.OK, payload)
             return
         if parsed.path == f"{runtime.route_prefix}/logs":
             params = parse_qs(parsed.query)
             limit = max(1, min(int(params.get("limit", ["50"])[0]), 200))
-            self._json(HTTPStatus.OK, {"items": runtime.state.recent_log(limit)})
+            now = time.time()
+            with runtime.cache_lock:
+                cached_entry = runtime.cached_logs.get(limit)
+                if cached_entry is None or now - cached_entry[0] >= self.stm32_logs_cache_ttl_seconds:
+                    payload = {"items": runtime.state.recent_log(limit)}
+                    runtime.cached_logs[limit] = (now, payload)
+                    if len(runtime.cached_logs) > 8:
+                        runtime.cached_logs.clear()
+                else:
+                    payload = cached_entry[1]
+            self._json(HTTPStatus.OK, payload)
             return
         if parsed.path == f"{runtime.route_prefix}/events":
             self._stm32_sse(runtime)
@@ -791,6 +957,10 @@ def parse_args() -> argparse.Namespace:
         "--event-db-path",
         default=str(Path(__file__).with_name("state") / "smart_home_events.sqlite3"),
     )
+    parser.add_argument(
+        "--upload-dir",
+        default=str(Path("/home/trungcoolboy/smart-home/uploads/dashboard")),
+    )
     return parser.parse_args()
 
 
@@ -895,6 +1065,7 @@ def main() -> int:
     Handler.stm32_runtimes = stm32_runtimes
     Handler.room_node_runtimes = room_node_runtimes
     Handler.event_store = event_store
+    Handler.upload_dir = Path(args.upload_dir)
 
     server = SmartHomeApiServer((args.host, args.port), Handler)
     print(f"smart home api listening on http://{args.host}:{args.port}")

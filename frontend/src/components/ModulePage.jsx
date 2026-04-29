@@ -8,6 +8,725 @@ import fptPlayIcon from "../assets/tv-apps/fptplay.ico";
 import vieonIcon from "../assets/tv-apps/vieon.ico";
 import vtvGoIcon from "../assets/tv-apps/vtvgo.ico";
 
+const SERVO_DIAL_START_DEG = -135;
+const SERVO_DIAL_END_DEG = 135;
+const SERVO_DIAL_SWEEP_DEG = SERVO_DIAL_END_DEG - SERVO_DIAL_START_DEG;
+
+function clampServoDialValue(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function servoDialAngleFromValue(value, min, max) {
+  if (max <= min) {
+    return SERVO_DIAL_START_DEG;
+  }
+  const ratio = (clampServoDialValue(value, min, max) - min) / (max - min);
+  return SERVO_DIAL_START_DEG + ratio * SERVO_DIAL_SWEEP_DEG;
+}
+
+function servoDialValueFromPointer(clientX, clientY, bounds, min, max) {
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  const angleDeg = (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI;
+  const clampedAngle = Math.max(SERVO_DIAL_START_DEG, Math.min(SERVO_DIAL_END_DEG, angleDeg));
+  const ratio = (clampedAngle - SERVO_DIAL_START_DEG) / SERVO_DIAL_SWEEP_DEG;
+  return Math.round(min + ratio * (max - min));
+}
+
+function ServoDial({ min, max, value, disabled, onChange }) {
+  const dialRef = useRef(null);
+  const draggingRef = useRef(false);
+  const angleDeg = servoDialAngleFromValue(value, min, max);
+  const angleRad = (angleDeg * Math.PI) / 180;
+  const center = 60;
+  const needleLength = 34;
+  const knobRadius = 7;
+  const knobX = center + Math.cos(angleRad) * needleLength;
+  const knobY = center + Math.sin(angleRad) * needleLength;
+
+  function updateFromPointer(event) {
+    if (!dialRef.current || disabled) {
+      return;
+    }
+    const nextValue = servoDialValueFromPointer(
+      event.clientX,
+      event.clientY,
+      dialRef.current.getBoundingClientRect(),
+      min,
+      max,
+    );
+    onChange(nextValue);
+  }
+
+  return (
+    <div
+      ref={dialRef}
+      className={`servo-dial ${disabled ? "is-disabled" : ""}`}
+      onPointerDown={(event) => {
+        if (disabled) {
+          return;
+        }
+        draggingRef.current = true;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateFromPointer(event);
+      }}
+      onPointerMove={(event) => {
+        if (!draggingRef.current) {
+          return;
+        }
+        updateFromPointer(event);
+      }}
+      onPointerUp={(event) => {
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+      onPointerCancel={(event) => {
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+    >
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <circle className="servo-dial-ring" cx="60" cy="60" r="44" />
+        <path
+          className="servo-dial-arc"
+          d="M28.9 91.1A44 44 0 1 1 91.1 91.1"
+        />
+        <line className="servo-dial-needle" x1={center} y1={center} x2={knobX} y2={knobY} />
+        <circle className="servo-dial-hub" cx={center} cy={center} r="5" />
+        <circle className="servo-dial-knob" cx={knobX} cy={knobY} r={knobRadius} />
+      </svg>
+      <div className="servo-dial-value">
+        <strong>{value}°</strong>
+      </div>
+    </div>
+  );
+}
+
+function ServoTwinDial({
+  fan1Min,
+  fan1Max,
+  fan1Value,
+  fan2Min,
+  fan2Max,
+  fan2Value,
+  disabled,
+  onChangeFan1,
+  onChangeFan2,
+  onCommitFan1,
+  onCommitFan2,
+}) {
+  const dialRef = useRef(null);
+  const draggingRef = useRef(false);
+  const activeNeedleRef = useRef("fan1");
+  const fan1ValueRef = useRef(fan1Value);
+  const fan2ValueRef = useRef(fan2Value);
+  const center = 110;
+  const needleLength = 88;
+  const FAN1_ARC_START = -155;
+  const FAN1_ARC_END = -92;
+  const FAN2_ARC_START = -88;
+  const FAN2_ARC_END = -25;
+
+  fan1ValueRef.current = fan1Value;
+  fan2ValueRef.current = fan2Value;
+
+  function angleFromValue(value, min, max, startDeg, endDeg, reversed = false) {
+    if (max <= min) {
+      return startDeg;
+    }
+    const rawRatio = (clampServoDialValue(value, min, max) - min) / (max - min);
+    const ratio = reversed ? (1 - rawRatio) : rawRatio;
+    return startDeg + ratio * (endDeg - startDeg);
+  }
+
+  function valueFromPointer(clientX, clientY, bounds, min, max, startDeg, endDeg, reversed = false) {
+    const centerX = bounds.left + bounds.width / 2;
+    const centerY = bounds.top + bounds.height / 2;
+    const angleDeg = (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI;
+    const clampedAngle = Math.max(Math.min(startDeg, endDeg), Math.min(Math.max(startDeg, endDeg), angleDeg));
+    const rawRatio = (clampedAngle - startDeg) / (endDeg - startDeg || 1);
+    const ratio = reversed ? (1 - rawRatio) : rawRatio;
+    return Math.round(min + ratio * (max - min));
+  }
+
+  const fan1AngleDeg = angleFromValue(fan1Value, fan1Min, fan1Max, FAN1_ARC_START, FAN1_ARC_END, true);
+  const fan2AngleDeg = angleFromValue(fan2Value, fan2Min, fan2Max, FAN2_ARC_START, FAN2_ARC_END, true);
+
+  function pickActiveNeedle(event, bounds) {
+    const localX = event.clientX - bounds.left;
+    const localY = event.clientY - bounds.top;
+    const fan1Distance = Math.hypot(localX - fan1Needle.x, localY - fan1Needle.y);
+    const fan2Distance = Math.hypot(localX - fan2Needle.x, localY - fan2Needle.y);
+    const knobThreshold = 24;
+
+    if (fan1Distance <= knobThreshold || fan2Distance <= knobThreshold) {
+      return fan1Distance <= fan2Distance ? "fan1" : "fan2";
+    }
+
+    return event.clientX < bounds.left + bounds.width / 2 ? "fan1" : "fan2";
+  }
+
+  function updateFromPointer(event) {
+    if (!dialRef.current || disabled) {
+      return;
+    }
+    const bounds = dialRef.current.getBoundingClientRect();
+    const nextNeedle = activeNeedleRef.current;
+    if (nextNeedle === "fan1") {
+      const nextValue = valueFromPointer(
+        event.clientX,
+        event.clientY,
+        bounds,
+        fan1Min,
+        fan1Max,
+        FAN1_ARC_START,
+        FAN1_ARC_END,
+        true,
+      );
+      const clamped = clampServoDialValue(nextValue, fan1Min, fan1Max);
+      fan1ValueRef.current = clamped;
+      onChangeFan1(clamped);
+      return;
+    }
+    const nextValue = valueFromPointer(
+      event.clientX,
+      event.clientY,
+      bounds,
+      fan2Min,
+      fan2Max,
+      FAN2_ARC_START,
+      FAN2_ARC_END,
+      true,
+    );
+    const clamped = clampServoDialValue(nextValue, fan2Min, fan2Max);
+    fan2ValueRef.current = clamped;
+    onChangeFan2(clamped);
+  }
+
+  function commitActiveNeedle() {
+    if (activeNeedleRef.current === "fan1") {
+      onCommitFan1?.(fan1ValueRef.current);
+      return;
+    }
+    onCommitFan2?.(fan2ValueRef.current);
+  }
+
+  function needleEnd(angleDeg) {
+    const angleRad = (angleDeg * Math.PI) / 180;
+    return {
+      x: center + Math.cos(angleRad) * needleLength,
+      y: center + Math.sin(angleRad) * needleLength,
+    };
+  }
+
+  const fan1Needle = needleEnd(fan1AngleDeg);
+  const fan2Needle = needleEnd(fan2AngleDeg);
+
+  return (
+    <div
+      ref={dialRef}
+      className={`servo-twin-dial ${disabled ? "is-disabled" : ""}`}
+      onPointerDown={(event) => {
+        if (disabled) {
+          return;
+        }
+        draggingRef.current = true;
+        activeNeedleRef.current = pickActiveNeedle(event, event.currentTarget.getBoundingClientRect());
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateFromPointer(event);
+      }}
+      onPointerMove={(event) => {
+        if (!draggingRef.current) {
+          return;
+        }
+        updateFromPointer(event);
+      }}
+      onPointerUp={(event) => {
+        if (draggingRef.current) {
+          commitActiveNeedle();
+        }
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+      onPointerCancel={(event) => {
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+    >
+      <svg viewBox="0 0 220 220" aria-hidden="true">
+        <path
+          className="servo-twin-dial-track"
+          d="M47.8 172.2A88 88 0 1 1 172.2 172.2"
+        />
+        <path
+          className="servo-twin-dial-arc"
+          d="M47.8 172.2A88 88 0 1 1 172.2 172.2"
+        />
+        <line className="servo-twin-dial-tick" x1="62" y1="160" x2="72" y2="154" />
+        <line className="servo-twin-dial-tick" x1="74" y1="78" x2="82" y2="86" />
+        <line className="servo-twin-dial-tick" x1="110" y1="42" x2="110" y2="54" />
+        <line className="servo-twin-dial-tick" x1="146" y1="78" x2="138" y2="86" />
+        <line className="servo-twin-dial-tick" x1="158" y1="160" x2="148" y2="154" />
+        <line className="servo-twin-dial-needle servo-twin-dial-needle-fan1" x1={center} y1={center} x2={fan1Needle.x} y2={fan1Needle.y} />
+        <line className="servo-twin-dial-needle servo-twin-dial-needle-fan2" x1={center} y1={center} x2={fan2Needle.x} y2={fan2Needle.y} />
+        <circle className="servo-twin-dial-knob servo-twin-dial-knob-fan1" cx={fan1Needle.x} cy={fan1Needle.y} r="9" />
+        <circle className="servo-twin-dial-knob servo-twin-dial-knob-fan2" cx={fan2Needle.x} cy={fan2Needle.y} r="8" />
+        <circle className="servo-twin-dial-hub" cx={center} cy={center} r="10" />
+        <text className="servo-twin-dial-label servo-twin-dial-label-left" x="52" y="186">
+          F1
+        </text>
+        <text className="servo-twin-dial-label servo-twin-dial-label-right" x="168" y="186">
+          F2
+        </text>
+      </svg>
+      <div className="servo-twin-dial-values">
+        <strong>F1 {fan1Value}°</strong>
+        <strong>F2 {fan2Value}°</strong>
+      </div>
+    </div>
+  );
+}
+
+function ServoGaugeDial({
+  min,
+  max,
+  value,
+  disabled,
+  label = "",
+  onChange,
+  onCommit,
+}) {
+  const dialRef = useRef(null);
+  const draggingRef = useRef(false);
+  const center = 110;
+  const needleLength = 88;
+  const ARC_START = -155;
+  const ARC_END = -25;
+
+  function angleFromValue(nextValue, minValue, maxValue, startDeg, endDeg) {
+    if (maxValue <= minValue) {
+      return startDeg;
+    }
+    const ratio = (clampServoDialValue(nextValue, minValue, maxValue) - minValue) / (maxValue - minValue);
+    return startDeg + ratio * (endDeg - startDeg);
+  }
+
+  function valueFromPointer(clientX, clientY, bounds, minValue, maxValue, startDeg, endDeg) {
+    const centerX = bounds.left + bounds.width / 2;
+    const centerY = bounds.top + bounds.height / 2;
+    const angleDeg = (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI;
+    const clampedAngle = Math.max(Math.min(startDeg, endDeg), Math.min(Math.max(startDeg, endDeg), angleDeg));
+    const ratio = (clampedAngle - startDeg) / (endDeg - startDeg || 1);
+    return Math.round(minValue + ratio * (maxValue - minValue));
+  }
+
+  function needleEnd(angleDeg) {
+    const angleRad = (angleDeg * Math.PI) / 180;
+    return {
+      x: center + Math.cos(angleRad) * needleLength,
+      y: center + Math.sin(angleRad) * needleLength,
+    };
+  }
+
+  function updateFromPointer(event) {
+    if (!dialRef.current || disabled) {
+      return;
+    }
+    const nextValue = valueFromPointer(
+      event.clientX,
+      event.clientY,
+      dialRef.current.getBoundingClientRect(),
+      min,
+      max,
+      ARC_START,
+      ARC_END,
+    );
+    onChange(clampServoDialValue(nextValue, min, max));
+  }
+
+  const angleDeg = angleFromValue(value, min, max, ARC_START, ARC_END);
+  const needle = needleEnd(angleDeg);
+
+  return (
+    <div
+      ref={dialRef}
+      className={`servo-twin-dial servo-single-dial ${disabled ? "is-disabled" : ""}`}
+      onPointerDown={(event) => {
+        if (disabled) {
+          return;
+        }
+        draggingRef.current = true;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateFromPointer(event);
+      }}
+      onPointerMove={(event) => {
+        if (!draggingRef.current) {
+          return;
+        }
+        updateFromPointer(event);
+      }}
+      onPointerUp={(event) => {
+        if (draggingRef.current) {
+          onCommit?.(value);
+        }
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+      onPointerCancel={(event) => {
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+    >
+      <svg viewBox="0 0 220 220" aria-hidden="true">
+        <path
+          className="servo-twin-dial-track"
+          d="M47.8 172.2A88 88 0 1 1 172.2 172.2"
+        />
+        <path
+          className="servo-twin-dial-arc"
+          d="M47.8 172.2A88 88 0 1 1 172.2 172.2"
+        />
+        <line className="servo-twin-dial-tick" x1="62" y1="160" x2="72" y2="154" />
+        <line className="servo-twin-dial-tick" x1="74" y1="78" x2="82" y2="86" />
+        <line className="servo-twin-dial-tick" x1="110" y1="42" x2="110" y2="54" />
+        <line className="servo-twin-dial-tick" x1="146" y1="78" x2="138" y2="86" />
+        <line className="servo-twin-dial-tick" x1="158" y1="160" x2="148" y2="154" />
+        <line className="servo-twin-dial-needle servo-twin-dial-needle-fan1" x1={center} y1={center} x2={needle.x} y2={needle.y} />
+        <circle className="servo-twin-dial-knob servo-twin-dial-knob-fan1" cx={needle.x} cy={needle.y} r="9" />
+        <circle className="servo-twin-dial-hub" cx={center} cy={center} r="10" />
+      </svg>
+      <div className="servo-twin-dial-values">
+        <strong>{label ? `${label} ${value}°` : `${value}°`}</strong>
+      </div>
+    </div>
+  );
+}
+
+function NumberWheelPicker({ label, min, max, value, disabled, orientation = "vertical", onChange, onCommit }) {
+  const wheelRef = useRef(null);
+  const commitTimerRef = useRef(null);
+  const itemExtent = 38;
+  const values = Array.from({ length: Math.max(0, max - min + 1) }, (_, index) => min + index);
+  const clampedValue = clampServoDialValue(value, min, max);
+
+  useEffect(() => {
+    if (!wheelRef.current) {
+      return undefined;
+    }
+    wheelRef.current.scrollTo(
+      orientation === "horizontal"
+        ? {
+            left: (clampedValue - min) * itemExtent,
+            behavior: "auto",
+          }
+        : {
+            top: (clampedValue - min) * itemExtent,
+            behavior: "auto",
+          },
+    );
+
+    return () => {
+      if (commitTimerRef.current) {
+        window.clearTimeout(commitTimerRef.current);
+        commitTimerRef.current = null;
+      }
+    };
+  }, [clampedValue, min, orientation]);
+
+  function scheduleCommit(nextValue) {
+    if (commitTimerRef.current) {
+      window.clearTimeout(commitTimerRef.current);
+    }
+    commitTimerRef.current = window.setTimeout(() => {
+      onCommit?.(nextValue);
+    }, 120);
+  }
+
+  function handleScroll(event) {
+    const nextIndex = Math.round(
+      (orientation === "horizontal" ? event.currentTarget.scrollLeft : event.currentTarget.scrollTop) / itemExtent,
+    );
+    const nextValue = clampServoDialValue(min + nextIndex, min, max);
+    onChange(nextValue);
+    scheduleCommit(nextValue);
+  }
+
+  function handleWheel(event) {
+    if (!wheelRef.current || disabled) {
+      return;
+    }
+    event.preventDefault();
+    if (orientation === "horizontal") {
+      wheelRef.current.scrollLeft += event.deltaY + event.deltaX;
+      return;
+    }
+    wheelRef.current.scrollTop += event.deltaY;
+  }
+
+  return (
+    <div className={`number-wheel-picker number-wheel-picker-${orientation} ${disabled ? "is-disabled" : ""}`}>
+      <span>{label}</span>
+      <div className={`number-wheel-shell number-wheel-shell-${orientation}`}>
+        <div className="number-wheel-highlight" aria-hidden="true" />
+        <div
+          ref={wheelRef}
+          className={`number-wheel-list number-wheel-list-${orientation}`}
+          onScroll={handleScroll}
+          onWheel={handleWheel}
+        >
+          <div className="number-wheel-spacer" aria-hidden="true" />
+          {values.map((itemValue) => (
+            <button
+              key={`${label}-${itemValue}`}
+              type="button"
+              className={`number-wheel-item ${itemValue === clampedValue ? "is-active" : ""}`}
+              disabled={disabled}
+              onClick={() => {
+                onChange(itemValue);
+                scheduleCommit(itemValue);
+                wheelRef.current?.scrollTo(
+                  orientation === "horizontal"
+                    ? {
+                        left: (itemValue - min) * itemExtent,
+                        behavior: "smooth",
+                      }
+                    : {
+                        top: (itemValue - min) * itemExtent,
+                        behavior: "smooth",
+                      },
+                );
+              }}
+            >
+              {itemValue}
+            </button>
+          ))}
+          <div className="number-wheel-spacer" aria-hidden="true" />
+        </div>
+      </div>
+      <strong>{clampedValue}°</strong>
+    </div>
+  );
+}
+
+function ServoHeadDial({
+  pan1Min,
+  pan1Max,
+  pan1Value,
+  pan2Min,
+  pan2Max,
+  pan2Value,
+  disabled,
+  onChangePan1,
+  onChangePan2,
+  onCommitPan1,
+  onCommitPan2,
+}) {
+  const headRef = useRef(null);
+  const draggingRef = useRef(false);
+  const activePartRef = useRef("pan2");
+  const pan1ValueRef = useRef(pan1Value);
+  const pan2ValueRef = useRef(pan2Value);
+
+  pan1ValueRef.current = pan1Value;
+  pan2ValueRef.current = pan2Value;
+
+  const pan1Ratio = (clampServoDialValue(pan1Value, pan1Min, pan1Max) - pan1Min) / Math.max(1, pan1Max - pan1Min);
+  const neckYaw = -1 + pan1Ratio * 2;
+  const yawAbs = Math.abs(neckYaw);
+  const faceTranslateX = neckYaw * 22;
+  const faceScaleX = 1 - yawAbs * 0.36;
+  const leftEyeShiftX = neckYaw * 8;
+  const rightEyeShiftX = neckYaw * 4;
+  const leftEyeRadius = 8 + Math.max(0, neckYaw) * 2 - Math.max(0, -neckYaw) * 2;
+  const rightEyeRadius = 8 + Math.max(0, -neckYaw) * 2 - Math.max(0, neckYaw) * 2;
+  const glossOpacity = 0.14 + yawAbs * 0.1;
+  const pan2Ratio = (clampServoDialValue(pan2Value, pan2Min, pan2Max) - pan2Min) / Math.max(1, pan2Max - pan2Min);
+  const facePitch = -1 + pan2Ratio * 2;
+  const faceTranslateY = facePitch * -8;
+  const faceScaleY = 1 - Math.abs(facePitch) * 0.2;
+  const eyeTranslateY = facePitch * -3;
+  const mouthTranslateY = facePitch * 4;
+  const shellTop = 46;
+  const shellBottom = 158;
+  const shellHeight = shellBottom - shellTop;
+  const shellFrontWidth = 96 * faceScaleX;
+  const shellFrontX = 110 - shellFrontWidth / 2 + faceTranslateX;
+  const shellDepth = 14 + yawAbs * 26;
+  const shellTopLift = 12 + yawAbs * 12;
+  const faceplateWidth = shellFrontWidth * 0.67;
+  const faceplateHeight = 74 * faceScaleY;
+  const faceplateX = 110 - faceplateWidth / 2 + faceTranslateX;
+  const faceplateY = 66 + faceTranslateY;
+  const leftFaceCenterX = faceplateX + faceplateWidth * 0.28 + leftEyeShiftX;
+  const rightFaceCenterX = faceplateX + faceplateWidth * 0.72 + rightEyeShiftX;
+  const mouthLeftX = faceplateX + faceplateWidth * 0.24;
+  const mouthRightX = faceplateX + faceplateWidth * 0.76;
+  const mouthCenterX = faceplateX + faceplateWidth * 0.5;
+  const shellRadius = Math.max(18, 28 * faceScaleX);
+  const visibleSide = neckYaw >= 0 ? "left" : "right";
+  const topOffsetX = neckYaw * 8;
+  const topFrontLeftX = shellFrontX;
+  const topFrontRightX = shellFrontX + shellFrontWidth;
+  const topBackLeftX = shellFrontX - shellDepth + topOffsetX;
+  const topBackRightX = shellFrontX + shellFrontWidth + shellDepth + topOffsetX;
+  const topFrontY = shellTop;
+  const topBackY = shellTop - shellTopLift;
+  const visibleSidePoints =
+    visibleSide === "left"
+      ? `${shellFrontX} ${shellTop + 10}, ${shellFrontX - shellDepth} ${shellTop + 10 - shellTopLift}, ${shellFrontX - shellDepth} ${shellBottom - 10 - shellTopLift}, ${shellFrontX} ${shellBottom - 10}`
+      : `${shellFrontX + shellFrontWidth} ${shellTop + 10}, ${shellFrontX + shellFrontWidth + shellDepth} ${shellTop + 10 - shellTopLift}, ${shellFrontX + shellFrontWidth + shellDepth} ${shellBottom - 10 - shellTopLift}, ${shellFrontX + shellFrontWidth} ${shellBottom - 10}`;
+  const hiddenSidePoints =
+    visibleSide === "left"
+      ? `${shellFrontX + shellFrontWidth} ${shellTop + 12}, ${shellFrontX + shellFrontWidth + 5} ${shellTop + 8}, ${shellFrontX + shellFrontWidth + 5} ${shellBottom - 12}, ${shellFrontX + shellFrontWidth} ${shellBottom - 8}`
+      : `${shellFrontX} ${shellTop + 12}, ${shellFrontX - 5} ${shellTop + 8}, ${shellFrontX - 5} ${shellBottom - 12}, ${shellFrontX} ${shellBottom - 8}`;
+
+  function valueFromHorizontalPointer(clientX, bounds, min, max) {
+    const ratio = Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width));
+    return Math.round(min + ratio * (max - min));
+  }
+
+  function updateFromPointer(event) {
+    if (!headRef.current || disabled) {
+      return;
+    }
+    const bounds = headRef.current.getBoundingClientRect();
+    const nextValue = valueFromHorizontalPointer(event.clientX, bounds, activePartRef.current === "pan1" ? pan1Min : pan2Min, activePartRef.current === "pan1" ? pan1Max : pan2Max);
+    if (activePartRef.current === "pan1") {
+      const clamped = clampServoDialValue(nextValue, pan1Min, pan1Max);
+      pan1ValueRef.current = clamped;
+      onChangePan1(clamped);
+      return;
+    }
+    const clamped = clampServoDialValue(nextValue, pan2Min, pan2Max);
+    pan2ValueRef.current = clamped;
+    onChangePan2(clamped);
+  }
+
+  function commitActivePart() {
+    if (activePartRef.current === "pan1") {
+      onCommitPan1?.(pan1ValueRef.current);
+      return;
+    }
+    onCommitPan2?.(pan2ValueRef.current);
+  }
+
+  return (
+    <div
+      ref={headRef}
+      className={`servo-head-dial ${disabled ? "is-disabled" : ""}`}
+      onPointerDown={(event) => {
+        if (disabled) {
+          return;
+        }
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const localY = event.clientY - bounds.top;
+        activePartRef.current = localY > bounds.height * 0.72 ? "pan1" : "pan2";
+        draggingRef.current = true;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateFromPointer(event);
+      }}
+      onPointerMove={(event) => {
+        if (!draggingRef.current) {
+          return;
+        }
+        updateFromPointer(event);
+      }}
+      onPointerUp={(event) => {
+        if (draggingRef.current) {
+          commitActivePart();
+        }
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+      onPointerCancel={(event) => {
+        draggingRef.current = false;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+    >
+      <svg viewBox="0 8 220 188" aria-hidden="true">
+        <defs>
+          <linearGradient
+            id="servoHeadCasingGradient"
+            x1={shellFrontX}
+            y1={shellTop}
+            x2={shellFrontX + shellFrontWidth}
+            y2={shellBottom}
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0%" stopColor="rgba(255,255,255,0.22)" />
+            <stop offset="45%" stopColor="rgba(136,160,178,0.14)" />
+            <stop offset="100%" stopColor="rgba(20,28,36,0.42)" />
+          </linearGradient>
+          <linearGradient
+            id="servoHeadFaceGradient"
+            x1={faceplateX}
+            y1={faceplateY}
+            x2={faceplateX + faceplateWidth}
+            y2={faceplateY + faceplateHeight}
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0%" stopColor="rgba(154,247,233,0.34)" />
+            <stop offset="100%" stopColor="rgba(36,84,97,0.2)" />
+          </linearGradient>
+          <linearGradient
+            id="servoHeadTopGradient"
+            x1={topBackLeftX}
+            y1={topBackY}
+            x2={topFrontRightX}
+            y2={topFrontY}
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0%" stopColor="rgba(255,255,255,0.24)" />
+            <stop offset="100%" stopColor="rgba(36,52,68,0.72)" />
+          </linearGradient>
+        </defs>
+        <ellipse className="servo-head-shadow" cx={110 + neckYaw * 12} cy="170" rx={42 - yawAbs * 4} ry="9" />
+        <g className="servo-head-shell">
+          <polygon
+            points={`${topFrontLeftX},${topFrontY} ${topFrontRightX},${topFrontY} ${topBackRightX},${topBackY} ${topBackLeftX},${topBackY}`}
+            fill="url(#servoHeadTopGradient)"
+            opacity="0.95"
+          />
+          <polygon points={hiddenSidePoints} className="servo-head-side" style={{ opacity: 0.18 }} />
+          <polygon points={visibleSidePoints} className="servo-head-side" style={{ opacity: 0.62 + yawAbs * 0.18 }} />
+          <rect x={shellFrontX} y={shellTop} width={shellFrontWidth} height={shellHeight} rx={shellRadius} className="servo-head-casing" />
+          <rect x={faceplateX} y={faceplateY} width={faceplateWidth} height={faceplateHeight} rx={20 * faceScaleX} className="servo-head-faceplate" />
+          <path d={`M${faceplateX + 8} ${faceplateY + 8}H${faceplateX + faceplateWidth - 8}`} className="servo-head-brow" />
+          <path
+            d={`M${faceplateX + 6} ${faceplateY + 16}Q${faceplateX + faceplateWidth * 0.5} ${faceplateY - 2} ${faceplateX + faceplateWidth - 6} ${faceplateY + 16}`}
+            className="servo-head-gloss"
+            style={{ opacity: glossOpacity }}
+          />
+          <g style={{ transform: `translateY(${eyeTranslateY}px)` }}>
+            <ellipse cx={leftFaceCenterX} cy="98" rx={Math.max(5, leftEyeRadius)} ry={Math.max(5.5, leftEyeRadius * 1.05)} className="servo-head-eye" />
+            <ellipse cx={rightFaceCenterX} cy="98" rx={Math.max(5, rightEyeRadius)} ry={Math.max(5.5, rightEyeRadius * 1.05)} className="servo-head-eye" />
+          </g>
+          <path
+            d={`M${mouthLeftX} 122Q${mouthCenterX} ${132 + mouthTranslateY} ${mouthRightX} 122`}
+            className="servo-head-mouth"
+          />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 function ModulePage({ page, alertFeed }) {
   const [deviceState, setDeviceState] = useState(null);
   const [deviceError, setDeviceError] = useState("");
@@ -36,6 +755,15 @@ function ModulePage({ page, alertFeed }) {
     pan2: "90",
     lid: "90",
   });
+  const [servoControlModes, setServoControlModes] = useState({
+    fans: "manual",
+    head: "manual",
+    lid: "manual",
+  });
+  const [byjControlModes, setByjControlModes] = useState({
+    scraper: "manual",
+    feeder: "manual",
+  });
   const [byj1TargetMmInput, setByj1TargetMmInput] = useState("0");
   const [byj2StepInput, setByj2StepInput] = useState("5000");
   const [byj2Direction, setByj2Direction] = useState("+");
@@ -54,6 +782,10 @@ function ModulePage({ page, alertFeed }) {
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
+  const [uploadItems, setUploadItems] = useState([]);
+  const [uploadError, setUploadError] = useState("");
+  const [uploadInfo, setUploadInfo] = useState("");
+  const [uploadingFile, setUploadingFile] = useState(false);
   const [activeModuleTab, setActiveModuleTab] = useState("");
   const [activeRoomDeviceTab, setActiveRoomDeviceTab] = useState("");
   const reconnectTimerRef = useRef(null);
@@ -75,6 +807,7 @@ function ModulePage({ page, alertFeed }) {
   const roomNodeSecondaryReconnectTimerRef = useRef(null);
   const roomNodeSecondaryStatusTimerRef = useRef(null);
   const roomNodeSecondaryCardRef = useRef(null);
+  const uploadInputRef = useRef(null);
   const sectionRefs = useRef({});
 
   function clampNumber(value, min, max) {
@@ -129,6 +862,26 @@ function ModulePage({ page, alertFeed }) {
     return message;
   }
 
+  function formatUploadSize(size) {
+    if (!Number.isFinite(size)) {
+      return "-";
+    }
+    if (size < 1024) {
+      return `${size} B`;
+    }
+    if (size < 1024 * 1024) {
+      return `${(size / 1024).toFixed(1)} KB`;
+    }
+    return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  function formatUploadModifiedAt(value) {
+    if (!Number.isFinite(value)) {
+      return "-";
+    }
+    return new Date(value * 1000).toLocaleString();
+  }
+
   const servoDefinitions = [
     { key: "fan1", label: "Fan 1", min: 0, max: 100 },
     { key: "fan2", label: "Fan 2", min: 70, max: 175 },
@@ -137,6 +890,52 @@ function ModulePage({ page, alertFeed }) {
     { key: "lid", label: "Lid", min: 0, max: 180 },
   ];
   const byj1MmPerStep = 42 / 50000;
+  const groupedWaterSensors = (page.waterLevelSensors?.items ?? []).reduce((groups, item) => {
+    const labelParts = String(item.label || "").trim().split(/\s+/);
+    const sensorLevel = labelParts.pop() ?? "";
+    const sensorName = labelParts.join(" ");
+    if (!sensorName || !sensorLevel) {
+      return groups;
+    }
+
+    const normalizedLevel = sensorLevel.toLowerCase();
+    const levelKey =
+      normalizedLevel === "low"
+        ? "low"
+        : normalizedLevel === "normal"
+          ? "normal"
+          : normalizedLevel === "high"
+            ? "high"
+            : normalizedLevel;
+
+    const existingGroup = groups.find((group) => group.name === sensorName);
+    const levelEntry = {
+      id: item.id,
+      key: levelKey,
+      label: sensorLevel,
+      wet: sensorStates[item.id]?.wet ?? item.wet ?? false,
+    };
+
+    if (existingGroup) {
+      existingGroup.levels[levelKey] = levelEntry;
+    } else {
+      groups.push({
+        name: sensorName,
+        levels: {
+          low: null,
+          normal: null,
+          high: null,
+          [levelKey]: levelEntry,
+        },
+      });
+    }
+
+    return groups;
+  }, []);
+
+  function renderServoGlyph(servoKey) {
+    return null;
+  }
 
   function reconcileIncomingDeviceState(nextState) {
     if (!nextState) {
@@ -236,6 +1035,13 @@ function ModulePage({ page, alertFeed }) {
     return getApiBaseUrl(page.roomNodeSecondary.apiPath);
   }
 
+  function getUploadBaseUrl() {
+    if (!page.uploadPanel?.apiPath) {
+      return "";
+    }
+    return getApiBaseUrl(page.uploadPanel.apiPath);
+  }
+
   function parseBridgeLine(line) {
     if (!line || typeof line !== "string") {
       return null;
@@ -317,7 +1123,7 @@ function ModulePage({ page, alertFeed }) {
     }
 
     const axisMatch = line.match(
-      /^axis\s+([ab])\s+enabled\s+(on|off)\s+moving\s+(on|off)\s+pos\s+(-?\d+)\s+target\s+(-?\d+)\s+vel\s+(-?\d+)\s+homed\s+(yes|no).*?\stravel\s+(\d+)/i,
+      /^axis\s+([ab])\s+enabled\s+(on|off)\s+moving\s+(on|off)\s+pos\s+(-?\d+)\s+target\s+(-?\d+)\s+vel\s+(-?\d+)\s+homed\s+(yes|no)\s+homing\s+([a-z_]+).*?\stravel\s+(\d+)/i,
     );
     if (axisMatch) {
       return {
@@ -329,7 +1135,8 @@ function ModulePage({ page, alertFeed }) {
         target: Number.parseInt(axisMatch[5], 10),
         vel: Number.parseInt(axisMatch[6], 10),
         homed: axisMatch[7].toLowerCase() === "yes",
-        travel: Number.parseInt(axisMatch[8], 10),
+        homing: axisMatch[8].toLowerCase(),
+        travel: Number.parseInt(axisMatch[9], 10),
       };
     }
 
@@ -378,6 +1185,24 @@ function ModulePage({ page, alertFeed }) {
       };
     }
 
+    if (/^ok ab park$/i.test(line)) {
+      return {
+        kind: "ab_park_ok",
+      };
+    }
+
+    if (/^ok ab auto_stop$/i.test(line)) {
+      return {
+        kind: "ab_auto_stop_ok",
+      };
+    }
+
+    if (/^ok ab stop$/i.test(line)) {
+      return {
+        kind: "ab_stop_ok",
+      };
+    }
+
     const axisMotionMatch = line.match(/^axis\s+([ab])\s+enabled\s+(on|off)\s+moving\s+(on|off).*homing\s+([a-z_]+)/i);
     if (axisMotionMatch) {
       return {
@@ -398,6 +1223,42 @@ function ModulePage({ page, alertFeed }) {
 
     setMotionState((current) => {
       let next = current;
+
+      function syncAbStateFromAxes() {
+        const nextA = next.a ?? current.a ?? null;
+        const nextB = next.b ?? current.b ?? null;
+        const existingAb = next.ab ?? current.ab ?? null;
+        if (!nextA || !nextB) {
+          return;
+        }
+
+        const axesSettled =
+          !nextA.moving
+          && !nextB.moving
+          && (nextA.homing ?? "idle") === "idle"
+          && (nextB.homing ?? "idle") === "idle";
+
+        if (!axesSettled) {
+          return;
+        }
+
+        // The bridge status endpoint often exposes only the last axis line after
+        // coordinated motion completes, so AB can stay stale-active unless we
+        // collapse it once both axes are visibly settled.
+        next.ab = {
+          active: false,
+          posA: nextA.pos ?? 0,
+          targetA: nextA.target ?? nextA.pos ?? 0,
+          posB: nextB.pos ?? 0,
+          targetB: nextB.target ?? nextB.pos ?? 0,
+          stepsDone: 0,
+          stepsTotal: 0,
+          intervalUs: 0,
+          cruiseUs: 0,
+          startUs: 0,
+          parked: existingAb?.parked ?? false,
+        };
+      }
 
       lines.forEach((line) => {
         const parsed = parseMotionLine(line);
@@ -420,11 +1281,18 @@ function ModulePage({ page, alertFeed }) {
 
         if (parsed.kind === "axis") {
           next[parsed.axis] = parsed;
+          syncAbStateFromAxes();
           return;
         }
 
         if (parsed.kind === "ab") {
-          next.ab = parsed;
+          next.ab = {
+            ...parsed,
+            parked:
+              parsed.active
+                ? false
+                : ((next.ab ?? current.ab)?.parked ?? false),
+          };
           if (!parsed.active) {
             if (next.a ?? current.a) {
               next.a = { ...(next.a ?? current.a), moving: false };
@@ -442,6 +1310,7 @@ function ModulePage({ page, alertFeed }) {
             ...existingAxis,
             enabled: true,
             moving: false,
+            homing: "idle",
             homed: true,
             pos: 0,
             target: 0,
@@ -458,6 +1327,7 @@ function ModulePage({ page, alertFeed }) {
             intervalUs: 0,
             cruiseUs: 0,
             startUs: 0,
+            parked: false,
           };
           return;
         }
@@ -468,6 +1338,7 @@ function ModulePage({ page, alertFeed }) {
             ...existingAxis,
             enabled: true,
             moving: false,
+            homing: "idle",
             homed: true,
             pos: 0,
             target: 0,
@@ -485,6 +1356,7 @@ function ModulePage({ page, alertFeed }) {
             intervalUs: 0,
             cruiseUs: 0,
             startUs: 0,
+            parked: false,
           };
           return;
         }
@@ -493,7 +1365,10 @@ function ModulePage({ page, alertFeed }) {
           const existingAxis = next[parsed.axis] ?? current[parsed.axis] ?? {};
           next[parsed.axis] = {
             ...existingAxis,
+            enabled: false,
             moving: false,
+            homing: "idle",
+            homed: false,
             vel: 0,
           };
           next.ab = {
@@ -507,6 +1382,26 @@ function ModulePage({ page, alertFeed }) {
             intervalUs: 0,
             cruiseUs: 0,
             startUs: 0,
+            parked: false,
+          };
+          return;
+        }
+
+        if (parsed.kind === "ab_park_ok") {
+          const existingAb = next.ab ?? current.ab ?? {};
+          next.ab = {
+            ...existingAb,
+            parked: true,
+          };
+          return;
+        }
+
+        if (parsed.kind === "ab_auto_stop_ok" || parsed.kind === "ab_stop_ok") {
+          const existingAb = next.ab ?? current.ab ?? {};
+          next.ab = {
+            ...existingAb,
+            active: false,
+            parked: false,
           };
           return;
         }
@@ -516,34 +1411,9 @@ function ModulePage({ page, alertFeed }) {
           next[parsed.axis] = {
             ...existingAxis,
             moving: parsed.moving,
+            homing: parsed.homingState,
           };
-          if (parsed.moving || parsed.homingState !== "idle") {
-            next.ab = {
-              active: false,
-              posA: next.a?.pos ?? current.a?.pos ?? 0,
-              targetA: next.a?.target ?? current.a?.target ?? 0,
-              posB: next.b?.pos ?? current.b?.pos ?? 0,
-              targetB: next.b?.target ?? current.b?.target ?? 0,
-              stepsDone: 0,
-              stepsTotal: 0,
-              intervalUs: 0,
-              cruiseUs: 0,
-              startUs: 0,
-            };
-            return;
-          }
-          next.ab = {
-            active: false,
-            posA: next.a?.pos ?? current.a?.pos ?? 0,
-            targetA: next.a?.target ?? current.a?.target ?? 0,
-            posB: next.b?.pos ?? current.b?.pos ?? 0,
-            targetB: next.b?.target ?? current.b?.target ?? 0,
-            stepsDone: 0,
-            stepsTotal: 0,
-            intervalUs: 0,
-            cruiseUs: 0,
-            startUs: 0,
-          };
+          syncAbStateFromAxes();
           return;
         }
       });
@@ -909,36 +1779,40 @@ function ModulePage({ page, alertFeed }) {
       setBAxisTravelSteps("");
       setBAxisDecelWindowSteps("");
       setBAxisGotoPosition("");
-      setMotionState({ a: null, b: null, ab: null });
       return;
     }
     setBAxisTravelSteps(String(tuning.defaultTravelSteps ?? ""));
     setBAxisDecelWindowSteps(String(tuning.defaultDecelWindowSteps ?? ""));
     setBAxisGotoPosition("");
-    setMotionState({
-      a: tuning.defaultATravelSteps
-        ? {
-            enabled: false,
-            moving: false,
-            pos: 0,
-            target: 0,
-            vel: 0,
-            homed: false,
-            travel: tuning.defaultATravelSteps,
-          }
-        : null,
-      b: tuning.defaultTravelSteps
-        ? {
-            enabled: false,
-            moving: false,
-            pos: 0,
-            target: 0,
-            vel: 0,
-            homed: false,
-            travel: tuning.defaultTravelSteps,
-          }
-        : null,
-      ab: null,
+    setMotionState((current) => {
+      if (current?.a || current?.b || current?.ab) {
+        return current;
+      }
+      return {
+        a: tuning.defaultATravelSteps
+          ? {
+              enabled: false,
+              moving: false,
+              pos: 0,
+              target: 0,
+              vel: 0,
+              homed: false,
+              travel: tuning.defaultATravelSteps,
+            }
+          : null,
+        b: tuning.defaultTravelSteps
+          ? {
+              enabled: false,
+              moving: false,
+              pos: 0,
+              target: 0,
+              vel: 0,
+              homed: false,
+              travel: tuning.defaultTravelSteps,
+            }
+          : null,
+        ab: null,
+      };
     });
   }, [page.bridge?.bAxisTuning]);
 
@@ -953,8 +1827,15 @@ function ModulePage({ page, alertFeed }) {
 
     let cancelled = false;
     let eventSource = null;
+    let bridgeStreamConnected = false;
+    let bridgeStatusInFlight = false;
+    let bridgeLogsInFlight = false;
 
     async function loadBridgeLogs() {
+      if (bridgeLogsInFlight || bridgeStreamConnected) {
+        return;
+      }
+      bridgeLogsInFlight = true;
       try {
         const response = await fetch(`${baseUrl}/logs?limit=40`);
         if (!response.ok) {
@@ -971,11 +1852,17 @@ function ModulePage({ page, alertFeed }) {
         if (!cancelled) {
           setBridgeError(error.message);
         }
+      } finally {
+        bridgeLogsInFlight = false;
       }
     }
 
     async function loadBridgeStatus(options = {}) {
       const preserveError = options.preserveError === true;
+      if (bridgeStatusInFlight) {
+        return;
+      }
+      bridgeStatusInFlight = true;
       try {
         const response = await fetch(`${baseUrl}/status`);
         if (!response.ok) {
@@ -994,6 +1881,8 @@ function ModulePage({ page, alertFeed }) {
         if (!cancelled) {
           setBridgeError(error.message);
         }
+      } finally {
+        bridgeStatusInFlight = false;
       }
     }
 
@@ -1002,7 +1891,18 @@ function ModulePage({ page, alertFeed }) {
         return;
       }
 
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+
       eventSource = new EventSource(`${baseUrl}/events`);
+      eventSource.onopen = () => {
+        if (!cancelled) {
+          bridgeStreamConnected = true;
+          setBridgeError("");
+        }
+      };
       eventSource.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
@@ -1041,8 +1941,10 @@ function ModulePage({ page, alertFeed }) {
 
       eventSource.onerror = () => {
         if (!cancelled) {
+          bridgeStreamConnected = false;
           setBridgeError("bridge realtime stream disconnected");
           eventSource.close();
+          eventSource = null;
           bridgeReconnectTimerRef.current = window.setTimeout(() => {
             loadBridgeStatus({ preserveError: true });
             loadBridgeLogs();
@@ -1057,13 +1959,16 @@ function ModulePage({ page, alertFeed }) {
     connectBridgeEvents();
     bridgeStatusTimerRef.current = window.setInterval(() => {
       loadBridgeStatus({ preserveError: true });
-      loadBridgeLogs();
-    }, 1000);
+      if (!bridgeStreamConnected) {
+        loadBridgeLogs();
+      }
+    }, 2000);
 
     return () => {
       cancelled = true;
       if (eventSource) {
         eventSource.close();
+        eventSource = null;
       }
       if (bridgeReconnectTimerRef.current) {
         window.clearTimeout(bridgeReconnectTimerRef.current);
@@ -1248,6 +2153,44 @@ function ModulePage({ page, alertFeed }) {
     };
   }, [page.roomNodeSecondary?.apiPath]);
 
+  useEffect(() => {
+    const baseUrl = getUploadBaseUrl();
+    if (!baseUrl) {
+      setUploadItems([]);
+      setUploadError("");
+      setUploadInfo("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadUploads(preserveInfo = false) {
+      try {
+        const response = await fetch(baseUrl);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `uploads ${response.status}`);
+        }
+        if (!cancelled) {
+          setUploadItems(payload.items ?? []);
+          setUploadError("");
+          if (!preserveInfo) {
+            setUploadInfo("");
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setUploadError(error.message);
+        }
+      }
+    }
+
+    loadUploads(true);
+    return () => {
+      cancelled = true;
+    };
+  }, [page.uploadPanel?.apiPath]);
+
   const liveConnectivity = deviceState
     ? deviceState.paired
       ? deviceState.wakePending
@@ -1304,13 +2247,23 @@ function ModulePage({ page, alertFeed }) {
     "vieplay.vn": vieonIcon,
     "com.vtvgotv.app": vtvGoIcon,
   };
+  const preferredLaunchAppFallbacks = [
+    { id: "youtube.leanback.v4", title: "YouTube", icon: youtubeIcon },
+    { id: "com.fpt.fptplay", title: "FPT Play", icon: fptPlayIcon },
+    { id: "spotify-beehive", title: "Spotify", icon: spotifyIcon },
+    { id: "com.webos.app.browser", title: "Browser", icon: browserIcon },
+    { id: "vieplay.vn", title: "VieON", icon: vieonIcon },
+    { id: "com.vtvgotv.app", title: "VTVGo", icon: vtvGoIcon },
+  ];
   const liveLaunchPoints = Array.isArray(deviceState?.launchPoints) ? deviceState.launchPoints : [];
   const preferredLaunchApps = preferredLaunchAppIds
     .map((appId) => liveLaunchPoints.find((item) => item?.id === appId))
     .filter(Boolean);
   const featuredLaunchApps = preferredLaunchApps.length
     ? preferredLaunchApps
-    : liveLaunchPoints.filter((item) => item?.id && item?.icon).slice(0, 6);
+    : liveLaunchPoints.length
+      ? liveLaunchPoints.filter((item) => item?.id && item?.icon).slice(0, 6)
+      : preferredLaunchAppFallbacks;
   const hasLiveForegroundApp = Boolean(deviceState?.reachable && !deviceState?.stale && deviceState?.foregroundAppId);
   const currentForegroundAppTitle = hasLiveForegroundApp
     ? (deviceState?.foregroundAppTitle ?? deviceState?.foregroundAppId ?? "Unknown")
@@ -1367,17 +2320,53 @@ function ModulePage({ page, alertFeed }) {
   const byj2State = byjStates.byj2 ?? null;
   const byj1CurrentMm = Number.isFinite(byj1State?.mm) ? byj1State.mm : ((byj1State?.pos ?? 0) * byj1MmPerStep);
   const byj1TargetMm = (byj1State?.target ?? 0) * byj1MmPerStep;
-  const hasAquariumTabs = Boolean(page.bridge?.bAxisTuning && page.deviceStrip?.length > 1);
+  const isAquariumPage = Boolean(page.bridge && page.pumpControl);
+  const aquariumSectionTabs = isAquariumPage
+    ? [
+        { id: "control", label: "Control", icon: "control" },
+        { id: "servo", label: "Servo", icon: "servo" },
+        { id: "workspace", label: "AB Workspace", icon: "control" },
+      ]
+    : (page.deviceStrip ?? []);
+  const hasAquariumTabs = Boolean(page.bridge?.bAxisTuning && aquariumSectionTabs.length > 1);
   const showControlTab = !hasAquariumTabs || activeModuleTab === "control";
+  const showServoTab = hasAquariumTabs && activeModuleTab === "servo";
   const showWorkspaceTab = hasAquariumTabs && activeModuleTab === "workspace";
   const showFeaturedDeviceTab = !page.featuredDevice || activeRoomDeviceTab === "featured";
+  const showSwitchPanelTab = !page.featuredDevice || activeRoomDeviceTab === "switch-panel";
   const showRoomNodeTab = !page.featuredDevice || activeRoomDeviceTab === "room-node";
   const showRoomNodeSecondaryTab = !page.featuredDevice || activeRoomDeviceTab === "room-node-secondary";
   const currentAMm = (motionState.ab?.posA ?? motionState.a?.pos ?? 0) * aMmPerStep;
   const currentBMm = (motionState.ab?.posB ?? motionState.b?.pos ?? 0) * bMmPerStep;
   const liveTargetAMm = (motionState.ab?.targetA ?? motionState.a?.target ?? 0) * aMmPerStep;
   const liveTargetBMm = (motionState.ab?.targetB ?? motionState.b?.target ?? 0) * bMmPerStep;
-  const anyAxisMoving = Boolean(motionState.a?.moving || motionState.b?.moving || motionState.ab?.active);
+  const anyAxisMoving = Boolean(motionState.a?.moving || motionState.b?.moving);
+  const abCoordinatorActive = Boolean(motionState.ab?.active);
+  const anyAbMotion = Boolean(anyAxisMoving || abCoordinatorActive);
+  const anyAxisHoming = Boolean(
+    (motionState.a?.homing && motionState.a.homing !== "idle")
+    || (motionState.b?.homing && motionState.b.homing !== "idle"),
+  );
+  const anyAxisEnabled = Boolean(motionState.a?.enabled || motionState.b?.enabled);
+  const bothAxesKnown = Boolean(motionState.a && motionState.b);
+  const bothAxesDisabled = Boolean(
+    bothAxesKnown
+    && motionState.a?.enabled === false
+    && motionState.b?.enabled === false,
+  );
+  const bothAxesHomed = Boolean(motionState.a?.homed && motionState.b?.homed);
+  const abCommandLocked = Boolean(anyAbMotion || anyAxisHoming || bAxisCommandPending);
+  const abMotionLabel = anyAxisHoming
+    ? "Homing"
+    : anyAbMotion
+      ? "Moving"
+      : (motionState.ab?.parked && anyAxisEnabled && bothAxesHomed)
+        ? "Parked"
+      : bothAxesDisabled
+        ? "Stopped"
+      : (anyAxisEnabled && bothAxesHomed)
+        ? "Idle"
+        : "Idle";
   const effectiveTargetA = selectedABTarget?.aTargetMm ?? liveTargetAMm;
   const effectiveTargetB = selectedABTarget?.bTargetMm ?? liveTargetBMm;
   const currentAMarker = aTravelMm > 0 ? Math.max(0, Math.min(100, (currentAMm / aTravelMm) * 100)) : 0;
@@ -1386,8 +2375,92 @@ function ModulePage({ page, alertFeed }) {
   const targetBMarker = bTravelMm > 0 ? Math.max(0, Math.min(100, (effectiveTargetB / bTravelMm) * 100)) : 0;
   const selectedAMarker = aTravelMm > 0 && selectedABTarget ? Math.max(0, Math.min(100, (selectedABTarget.aTargetMm / aTravelMm) * 100)) : null;
   const selectedBMarker = bTravelMm > 0 && selectedABTarget ? Math.max(0, Math.min(100, (selectedABTarget.bTargetMm / bTravelMm) * 100)) : null;
+  const axisAStatusKey = motionState.a?.homing && motionState.a.homing !== "idle"
+    ? "homing"
+    : motionState.a?.homed
+      ? "homed"
+      : "not-homed";
+  const axisBStatusKey = motionState.b?.homing && motionState.b.homing !== "idle"
+    ? "homing"
+    : motionState.b?.homed
+      ? "homed"
+      : "not-homed";
+  const axisAStatusLabel = axisAStatusKey === "homing"
+    ? "Axis A: Homing"
+    : axisAStatusKey === "homed"
+      ? "Axis A: Homed"
+      : "Axis A: Not Homed";
+  const axisBStatusLabel = axisBStatusKey === "homing"
+    ? "Axis B: Homing"
+    : axisBStatusKey === "homed"
+      ? "Axis B: Homed"
+      : "Axis B: Not Homed";
   const parsedSelectedATargetMm = Number.parseFloat(selectedATargetMmInput);
   const parsedSelectedBTargetMm = Number.parseFloat(selectedBTargetMmInput);
+  const selectedTargetReached = Boolean(
+    selectedABTarget
+    && !anyAbMotion
+    && Math.abs(currentAMm - selectedABTarget.aTargetMm) <= Math.max(0.51, aMmPerStep * 2)
+    && Math.abs(currentBMm - selectedABTarget.bTargetMm) <= Math.max(0.51, bMmPerStep * 2),
+  );
+  const selectedTargetState = selectedABTarget
+    ? anyAbMotion
+      ? "moving"
+      : selectedTargetReached
+        ? "reached"
+        : "idle"
+    : "idle";
+  const roomSwitchItems = [
+    ...(page.switchPanel && page.roomNode
+      ? (page.roomNode.relays ?? []).map((relay) => ({
+          id: `primary-${relay.key}`,
+          label: `${page.roomNode.title} ${relay.label}`,
+          nodeKind: "primary",
+          relayKey: relay.key,
+          commandType: "relay",
+          relayOn: Boolean(roomNodeState?.relays?.[relay.key]),
+          ledModes: page.roomNode.ledModes ?? [],
+          ledMode:
+            page.roomNode.ledModeScopedByRelay === false
+              ? (roomNodeState?.ledMode ?? "auto")
+              : (roomNodeState?.ledModes?.[relay.key] ?? "auto"),
+        }))
+      : []),
+    ...(page.switchPanel && page.roomNodeSecondary
+      ? (page.roomNodeSecondary.relays ?? []).map((relay) => ({
+          id: `secondary-${relay.key}`,
+          label: `${page.roomNodeSecondary.title} ${relay.label}`,
+          nodeKind: "secondary",
+          relayKey: relay.key,
+          commandType: "relay",
+          relayOn: Boolean(roomNodeSecondaryState?.relays?.[relay.key]),
+          ledModes: page.roomNodeSecondary.ledModes ?? [],
+          ledMode:
+            page.roomNodeSecondary.ledModeScopedByRelay === false
+              ? (roomNodeSecondaryState?.ledMode ?? "auto")
+              : (roomNodeSecondaryState?.ledModes?.[relay.key] ?? "auto"),
+        }))
+      : []),
+    ...(page.switchPanel && page.roomNodeSecondary?.remoteRelayLabel
+      ? [
+          {
+            id: "secondary-remote-relay",
+            label: `${page.roomNodeSecondary.title} ${page.roomNodeSecondary.remoteRelayLabel}`,
+            nodeKind: "secondary",
+            relayKey: "remoteRelay",
+            commandType: "remote",
+            relayOn: Boolean(roomNodeSecondaryState?.remoteRelay),
+            ledModes: [],
+            ledMode: "auto",
+          },
+        ]
+      : []),
+  ].map((item) => ({
+    ...item,
+    ledIsAuto: item.ledMode === "auto",
+    ledIsOn: item.ledMode !== "auto" && item.ledMode !== "off",
+    hasLedControl: item.ledModes.length > 0,
+  }));
   function renderRemoteUtilityIcon(action) {
     if (action === "Power") {
       return (
@@ -1671,11 +2744,11 @@ function ModulePage({ page, alertFeed }) {
       return;
     }
     const baseUrl = getBridgeBaseUrl();
-      try {
-        const [statusResponse, logsResponse] = await Promise.all([
-          fetch(`${baseUrl}/status`),
-          fetch(`${baseUrl}/logs?limit=40`),
-        ]);
+    try {
+      const [statusResponse, logsResponse] = await Promise.all([
+        fetch(`${baseUrl}/status`),
+        fetch(`${baseUrl}/logs?limit=40`),
+      ]);
       const statusPayload = await statusResponse.json();
       const logsPayload = await logsResponse.json();
       if (!statusResponse.ok) {
@@ -1684,9 +2757,11 @@ function ModulePage({ page, alertFeed }) {
       if (!logsResponse.ok) {
         throw new Error(logsPayload.error || `logs ${logsResponse.status}`);
       }
+      const logItems = logsPayload.items ?? [];
       setBridgeState(statusPayload);
-      setBridgeLogs((logsPayload.items ?? []).slice(-6));
-      applyBridgeLinesToControls((logsPayload.items ?? []).map((item) => item.payload));
+      setBridgeLogs(logItems.slice(-6));
+      applyBridgeLinesToControls(logItems.map((item) => item.payload));
+      applyMotionLinesToState([statusPayload.lastLine].filter(Boolean));
       setBridgeError("");
     } catch (error) {
       setBridgeError(error.message);
@@ -1722,6 +2797,27 @@ function ModulePage({ page, alertFeed }) {
     } finally {
       setBAxisCommandPending(false);
     }
+  }
+
+  async function requestBridgeStatusSnapshot(delayMs = 180) {
+    if (!page.bridge?.apiPath) {
+      return;
+    }
+    const baseUrl = getBridgeBaseUrl();
+    window.setTimeout(async () => {
+      try {
+        await fetch(`${baseUrl}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: "status" }),
+        });
+        window.setTimeout(() => {
+          refreshBridgeStatus();
+        }, 120);
+      } catch (error) {
+        setBridgeError(error.message);
+      }
+    }, delayMs);
   }
 
   async function applyBAxisTravel() {
@@ -1760,36 +2856,101 @@ function ModulePage({ page, alertFeed }) {
     }
   }
 
-  async function homeBAxis() {
-    await sendBridgeTextCommand("axis b home");
-  }
-
   async function scanBAxisTravel() {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another axis command");
+      return;
+    }
     await sendBridgeTextCommand("axis b scan");
+    await requestBridgeStatusSnapshot(300);
   }
 
   async function homeAAxis() {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another axis command");
+      return;
+    }
     await sendBridgeTextCommand("axis a home");
+    await requestBridgeStatusSnapshot(300);
+  }
+
+  async function homeBAxis() {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another axis command");
+      return;
+    }
+    await sendBridgeTextCommand("axis b home");
+    await requestBridgeStatusSnapshot(300);
+  }
+
+  async function homeABAxes() {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another AB command");
+      return;
+    }
+    setMotionState((current) => ({
+      ...current,
+      ab: current.ab
+        ? {
+            ...current.ab,
+            parked: false,
+          }
+        : current.ab,
+    }));
+    await sendBridgeTextCommand("ab home");
   }
 
   async function scanAAxisTravel() {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another axis command");
+      return;
+    }
     await sendBridgeTextCommand("axis a scan");
+    await requestBridgeStatusSnapshot(300);
   }
 
   async function sendABGoto(aTarget, bTarget) {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another AB command");
+      return;
+    }
+    setMotionState((current) => ({
+      ...current,
+      ab: current.ab
+        ? {
+            ...current.ab,
+            parked: false,
+          }
+        : current.ab,
+    }));
     await sendBridgeTextCommand(`ab goto ${aTarget} ${bTarget}`);
   }
 
-  function parseABTargetFromInputs() {
-    const aTargetMm = Number.parseFloat(selectedATargetMmInput);
-    const bTargetMm = Number.parseFloat(selectedBTargetMmInput);
+  async function parkABAxes() {
+    if (abCommandLocked) {
+      setBridgeError("stop AB motion before sending another AB command");
+      return;
+    }
+    setSelectedABTarget({ aTargetMm: 0, bTargetMm: 0 });
+    setSelectedATargetMmInput("0.00");
+    setSelectedBTargetMmInput("0.00");
+    setMotionState((current) => ({
+      ...current,
+      ab: {
+        ...(current.ab ?? {}),
+        parked: true,
+      },
+    }));
+    await sendBridgeTextCommand("ab park");
+  }
 
+  function validateABTargetMm(aTargetMm, bTargetMm) {
     if (!Number.isFinite(aTargetMm) || !Number.isFinite(bTargetMm)) {
       setBridgeError("enter valid A/B targets in mm");
       return null;
     }
     if (!motionState.a?.homed || !motionState.b?.homed) {
-      setBridgeError("home A and B before sending an AB target");
+      setBridgeError("home AB before sending an AB target");
       return null;
     }
     if (aTargetMm < 0 || bTargetMm < 0 || aTargetMm > aTravelMm || bTargetMm > bTravelMm) {
@@ -1805,11 +2966,31 @@ function ModulePage({ page, alertFeed }) {
     };
   }
 
+  function parseABTargetFromInputs() {
+    const aTargetMm = Number.parseFloat(selectedATargetMmInput);
+    const bTargetMm = Number.parseFloat(selectedBTargetMmInput);
+    return validateABTargetMm(aTargetMm, bTargetMm);
+  }
+
+  async function applyABTargetMm(targetLike) {
+    const target = validateABTargetMm(targetLike?.aTargetMm, targetLike?.bTargetMm);
+    if (!target) {
+      return;
+    }
+    setSelectedABTarget({ aTargetMm: target.aTargetMm, bTargetMm: target.bTargetMm });
+    setSelectedATargetMmInput(target.aTargetMm.toFixed(2));
+    setSelectedBTargetMmInput(target.bTargetMm.toFixed(2));
+    await sendABGoto(target.aTargetSteps, target.bTargetSteps);
+  }
+
   async function applySelectedABTarget() {
     const target = parseABTargetFromInputs();
     if (!target) {
       return;
     }
+    setSelectedABTarget({ aTargetMm: target.aTargetMm, bTargetMm: target.bTargetMm });
+    setSelectedATargetMmInput(target.aTargetMm.toFixed(2));
+    setSelectedBTargetMmInput(target.bTargetMm.toFixed(2));
     await sendABGoto(target.aTargetSteps, target.bTargetSteps);
   }
 
@@ -1818,11 +2999,50 @@ function ModulePage({ page, alertFeed }) {
     if (!target) {
       return;
     }
+    setSelectedABTarget({ aTargetMm: target.aTargetMm, bTargetMm: target.bTargetMm });
+    setSelectedATargetMmInput(target.aTargetMm.toFixed(2));
+    setSelectedBTargetMmInput(target.bTargetMm.toFixed(2));
     await sendABGoto(target.aTargetSteps, target.bTargetSteps);
   }
 
   async function stopABMotion() {
+    setMotionState((current) => ({
+      a: current.a
+        ? {
+            ...current.a,
+            enabled: false,
+            moving: false,
+            homing: "idle",
+            homed: false,
+            vel: 0,
+          }
+        : current.a,
+      b: current.b
+        ? {
+            ...current.b,
+            enabled: false,
+            moving: false,
+            homing: "idle",
+            homed: false,
+            vel: 0,
+          }
+        : current.b,
+      ab: {
+        active: false,
+        posA: current.a?.pos ?? 0,
+        targetA: current.a?.target ?? current.a?.pos ?? 0,
+        posB: current.b?.pos ?? 0,
+        targetB: current.b?.target ?? current.b?.pos ?? 0,
+        stepsDone: 0,
+        stepsTotal: 0,
+        intervalUs: 0,
+        cruiseUs: 0,
+        startUs: 0,
+        parked: false,
+      },
+    }));
     await runBridgeCommandSequence(["ab stop", "axis a stop", "axis b stop"], 120);
+    await requestBridgeStatusSnapshot(300);
   }
 
   async function refreshServoStatus() {
@@ -1858,6 +3078,14 @@ function ModulePage({ page, alertFeed }) {
     await sendBridgeTextCommand("byj byj1 enable on");
     await new Promise((resolve) => window.setTimeout(resolve, 120));
     await sendBridgeTextCommand("byj byj1 home");
+  }
+
+  async function stopByj1() {
+    await sendBridgeTextCommand("byj byj1 stop");
+  }
+
+  async function parkByj1() {
+    await runBridgeCommandSequence(["byj byj1 enable on", "byj byj1 goto 0"], 120);
   }
 
   async function applyByj1GotoMm() {
@@ -1985,7 +3213,229 @@ function ModulePage({ page, alertFeed }) {
     }
   }
 
+  async function refreshUploads() {
+    const baseUrl = getUploadBaseUrl();
+    if (!baseUrl) {
+      return;
+    }
+    try {
+      const response = await fetch(baseUrl);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `uploads ${response.status}`);
+      }
+      setUploadItems(payload.items ?? []);
+      setUploadError("");
+    } catch (error) {
+      setUploadError(error.message);
+    }
+  }
+
+  async function uploadDashboardFile() {
+    const baseUrl = getUploadBaseUrl();
+    const file = uploadInputRef.current?.files?.[0];
+    if (!baseUrl) {
+      return;
+    }
+    if (!file) {
+      setUploadError("choose a file first");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      setUploadingFile(true);
+      const response = await fetch(baseUrl, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `upload ${response.status}`);
+      }
+      setUploadItems(payload.items ?? []);
+      setUploadError("");
+      setUploadInfo(payload.item?.path ? `Saved to ${payload.item.path}` : "Upload complete");
+      if (uploadInputRef.current) {
+        uploadInputRef.current.value = "";
+      }
+    } catch (error) {
+      setUploadError(error.message);
+    } finally {
+      setUploadingFile(false);
+    }
+  }
+
+  function renderUploadPanel() {
+    if (!page.uploadPanel) {
+      return null;
+    }
+
+    return (
+      <section
+        ref={(element) => {
+          sectionRefs.current.upload = element;
+        }}
+        className="featured-device-card dashboard-upload-card"
+      >
+        <div className="featured-device-copy">
+          <h3>{page.uploadPanel.title}</h3>
+          {page.uploadPanel.note ? <p>{page.uploadPanel.note}</p> : null}
+        </div>
+
+        <div className="dashboard-upload-panel">
+          <div className="dashboard-upload-row">
+            <label className="dashboard-upload-picker" htmlFor="dashboard-upload-input">
+              <span>Choose File</span>
+              <input
+                id="dashboard-upload-input"
+                ref={uploadInputRef}
+                type="file"
+              />
+            </label>
+            <button
+              className="ghost-pill"
+              type="button"
+              onClick={uploadDashboardFile}
+              disabled={uploadingFile}
+            >
+              {uploadingFile ? "Uploading..." : "Upload"}
+            </button>
+            <button
+              className="ghost-pill"
+              type="button"
+              onClick={refreshUploads}
+              disabled={uploadingFile}
+            >
+              Refresh
+            </button>
+          </div>
+          {uploadInfo ? <p className="dashboard-upload-info">{uploadInfo}</p> : null}
+          {uploadError ? <p className="dashboard-upload-error">{uploadError}</p> : null}
+
+          <div className="dashboard-upload-list">
+            {uploadItems.length ? uploadItems.map((item) => (
+              <article key={`${item.path}-${item.modifiedAt}`} className="dashboard-upload-item">
+                <strong>{item.name}</strong>
+                <span>{formatUploadSize(item.size)}</span>
+                <span>{formatUploadModifiedAt(item.modifiedAt)}</span>
+                <code>{item.path}</code>
+              </article>
+            )) : (
+              <p className="dashboard-upload-empty">No uploaded files yet.</p>
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  async function setSwitchRelay(nodeKind, relayKey, nextValue, commandType = "relay") {
+    if (commandType === "remote") {
+      await sendRoomNodeSecondaryCommand({
+        action: "toggle_remote",
+      });
+      return;
+    }
+
+    if (nodeKind === "primary") {
+      await sendRoomNodeCommand({
+        action: "set_relay",
+        channel: relayKey,
+        value: nextValue,
+      });
+      return;
+    }
+
+    await sendRoomNodeSecondaryCommand({
+      action: "set_relay",
+      channel: relayKey,
+      value: nextValue,
+    });
+  }
+
+  async function setSwitchLedMode(nodeKind, relayKey, mode) {
+    if (nodeKind === "primary") {
+      await sendRoomNodeCommand({
+        action: "set_led_mode",
+        ...(page.roomNode?.ledModeScopedByRelay === false ? {} : { channel: relayKey }),
+        mode,
+      });
+      return;
+    }
+
+    await sendRoomNodeSecondaryCommand({
+      action: "set_led_mode",
+      ...(page.roomNodeSecondary?.ledModeScopedByRelay === false ? {} : { channel: relayKey }),
+      mode,
+    });
+  }
+
+  function renderServoModeToggle(modeKey) {
+    const isManual = servoControlModes[modeKey] === "manual";
+    return (
+      <div className="servo-mode-toggle servo-mode-toggle-rocker">
+        <label className={`ios-toggle ios-toggle-small servo-mode-rocker ${isManual ? "is-on" : ""}`}>
+          <input
+            type="checkbox"
+            checked={isManual}
+            onChange={(event) =>
+              setServoControlModes((current) => ({
+                ...current,
+                [modeKey]: event.target.checked ? "manual" : "auto",
+              }))
+            }
+          />
+          <span className="ios-toggle-track">
+            <span className="servo-mode-rocker-label">{isManual ? "M" : "A"}</span>
+          </span>
+        </label>
+      </div>
+    );
+  }
+
+  function renderByjModeToggle(modeKey) {
+    const isManual = byjControlModes[modeKey] === "manual";
+    return (
+      <div className="servo-mode-toggle servo-mode-toggle-rocker">
+        <label className={`ios-toggle ios-toggle-small servo-mode-rocker ${isManual ? "is-on" : ""}`}>
+          <input
+            type="checkbox"
+            checked={isManual}
+            onChange={(event) =>
+              setByjControlModes((current) => ({
+                ...current,
+                [modeKey]: event.target.checked ? "manual" : "auto",
+              }))
+            }
+          />
+          <span className="ios-toggle-track">
+            <span className="servo-mode-rocker-label">{isManual ? "M" : "A"}</span>
+          </span>
+        </label>
+      </div>
+    );
+  }
+
   function renderStripIcon(icon) {
+    if (icon === "servo") {
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="5.5" y="8" width="13" height="10" rx="2.4" />
+          <path d="M8 18v2" />
+          <path d="M16 18v2" />
+          <path d="M6.5 10H4.5" />
+          <path d="M19.5 10h-2" />
+          <circle cx="12" cy="7" r="2.1" />
+          <path d="M12 4.9v-1.6" />
+          <path d="M12 7l5-2.2" />
+          <path d="M12 7l-3.6 3.2" />
+        </svg>
+      );
+    }
+
     if (icon === "control") {
       return (
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -2020,6 +3470,92 @@ function ModulePage({ page, alertFeed }) {
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="8" />
       </svg>
+    );
+  }
+
+  function renderSwitchPanelCard() {
+    if (!page.switchPanel) {
+      return null;
+    }
+
+    return (
+      <article className="tv-control-card">
+        <span className="eyebrow">{page.switchPanel.title}</span>
+        <div className="switch-panel-list">
+          {roomSwitchItems.map((item) => (
+            <div key={item.id} className="switch-panel-row">
+              <div className="switch-panel-meta">
+                <strong>{item.label}</strong>
+              </div>
+              <label className={`ios-toggle ${item.relayOn ? "is-on" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={item.relayOn}
+                  onChange={(event) =>
+                    setSwitchRelay(item.nodeKind, item.relayKey, event.target.checked, item.commandType)
+                  }
+                />
+                <span className="ios-toggle-track" />
+              </label>
+              {item.hasLedControl ? (
+                <div className="switch-led-block">
+                  <button
+                    className={`switch-led-indicator ${item.ledIsOn ? "is-on" : ""} ${item.ledIsAuto ? "is-auto" : ""} switch-led-mode-${String(item.ledMode ?? "off").replace(/_/g, "-")}`}
+                    type="button"
+                    onClick={() =>
+                      setSwitchLedMode(
+                        item.nodeKind,
+                        item.relayKey,
+                        item.ledIsOn ? "off" : "on",
+                      )
+                    }
+                  />
+                  <div className="switch-mode-segment">
+                    <button
+                      className={item.ledIsAuto ? "active" : ""}
+                      type="button"
+                      onClick={() => setSwitchLedMode(item.nodeKind, item.relayKey, "auto")}
+                    >
+                      Auto
+                    </button>
+                    <button
+                      className={!item.ledIsAuto ? "active" : ""}
+                      type="button"
+                      onClick={() =>
+                        setSwitchLedMode(
+                          item.nodeKind,
+                          item.relayKey,
+                          item.ledMode === "off" || item.ledMode === "auto" ? "on" : item.ledMode,
+                        )
+                      }
+                    >
+                      Manual
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div />
+              )}
+              {item.hasLedControl && !item.ledIsAuto ? (
+                <div className="switch-led-modes">
+                  {item.ledModes
+                    .filter((mode) => mode.key !== "auto")
+                    .map((mode) => (
+                      <button
+                        key={`${item.id}-${mode.key}`}
+                        className={`source-chip ${item.ledMode === mode.key ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setSwitchLedMode(item.nodeKind, item.relayKey, mode.key)}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </article>
     );
   }
 
@@ -2201,6 +3737,17 @@ function ModulePage({ page, alertFeed }) {
               </svg>
             </button>
           ) : null}
+          {page.switchPanel ? (
+            <button
+              className={`room-device-icon ${showSwitchPanelTab ? "active" : ""}`}
+              type="button"
+              aria-label={page.switchPanel.title}
+              title={page.switchPanel.title}
+              onClick={() => setActiveRoomDeviceTab("switch-panel")}
+            >
+              {renderStripIcon("control")}
+            </button>
+          ) : null}
           {page.roomNode ? (
             <button
               className={`room-device-icon ${showRoomNodeTab ? "active" : ""}`}
@@ -2226,9 +3773,9 @@ function ModulePage({ page, alertFeed }) {
         </section>
       ) : null}
 
-      {!page.featuredDevice && page.deviceStrip?.length ? (
+      {!page.featuredDevice && aquariumSectionTabs.length ? (
         <section className="room-device-strip" aria-label="Module sections">
-          {page.deviceStrip.map((item) => (
+          {aquariumSectionTabs.map((item) => (
             <button
               key={item.id}
               className={`room-device-icon ${activeModuleTab === item.id ? "active" : ""}`}
@@ -2267,19 +3814,32 @@ function ModulePage({ page, alertFeed }) {
                   {page.waterLevelSensors ? (
                     <article className="pump-control-card sensor-control-card">
                       <span className="eyebrow">{page.waterLevelSensors.title}</span>
-                      <div className="sensor-grid">
-                        {page.waterLevelSensors.items.map((item) => (
-                          <div
-                            key={item.id}
-                            className={`sensor-pill ${(sensorStates[item.id]?.wet ?? false) ? "wet" : "dry"}`}
-                          >
-                            <div className="sensor-pill-head">
-                              <span
-                                className={`sensor-dot ${(sensorStates[item.id]?.wet ?? false) ? "wet" : "dry"}`}
-                                aria-hidden="true"
-                              />
-                              <strong>{item.label}</strong>
+                      <div className="sensor-chart-grid">
+                        {groupedWaterSensors.map((group) => (
+                          <div key={group.name} className="sensor-chart-card">
+                            <div className="sensor-chart-bar">
+                              {["low", "normal", "high"].map((levelKey) => {
+                                const level = group.levels[levelKey];
+                                if (!level) {
+                                  return (
+                                    <div
+                                      key={`${group.name}-${levelKey}`}
+                                      className="sensor-chart-segment sensor-chart-segment-empty"
+                                      aria-hidden="true"
+                                    />
+                                  );
+                                }
+                                return (
+                                  <div
+                                    key={level.id}
+                                    className={`sensor-chart-segment ${(level.wet ?? false) ? "wet" : "dry"}`}
+                                  >
+                                    <span className="sensor-chart-level">{level.label}</span>
+                                  </div>
+                                );
+                              })}
                             </div>
+                            <div className="sensor-chart-name">{group.name}</div>
                           </div>
                         ))}
                       </div>
@@ -2411,13 +3971,13 @@ function ModulePage({ page, alertFeed }) {
         <>
           {showFeaturedDeviceTab ? (
             <>
-              <section ref={featuredDeviceCardRef} className="featured-device-card">
-                <div className="featured-device-copy">
+              <section ref={featuredDeviceCardRef} className="tv-featured-shell">
+                <div className="tv-featured-copy">
                   <h3>{page.featuredDevice.name}</h3>
                 </div>
 
-                <div className="featured-device-actions">
-                  <div className="featured-actions-left">
+                <div className="tv-featured-actions">
+                  <div className="tv-featured-status-column">
                     <article className="tv-control-card featured-status-card">
                       <span className="eyebrow">Status</span>
                       <div className="tv-status-grid">
@@ -2570,7 +4130,7 @@ function ModulePage({ page, alertFeed }) {
                 </div>
               </section>
 
-              <section className="tv-control-grid">
+              <section className="tv-secondary-grid">
                 <article className="tv-control-card">
                   <span className="eyebrow">Quick Apps</span>
                   <div className="tv-app-grid">
@@ -2644,6 +4204,12 @@ function ModulePage({ page, alertFeed }) {
                 </article>
               </section>
             </>
+          ) : null}
+
+          {page.switchPanel && showSwitchPanelTab ? (
+            <section className="tv-control-grid">
+              {renderSwitchPanelCard()}
+            </section>
           ) : null}
 
           {(showRoomNodeTab || showRoomNodeSecondaryTab) && (page.roomNode || page.roomNodeSecondary) ? (
@@ -2833,6 +4399,7 @@ function ModulePage({ page, alertFeed }) {
 
       {!page.featuredDevice && (page.roomNode || page.roomNodeSecondary) ? (
         <section className="tv-control-grid">
+          {page.switchPanel ? renderSwitchPanelCard() : null}
           {page.roomNode ? (
             <article ref={roomNodeCardRef} className="tv-control-card">
               <span className="eyebrow">{page.roomNode.title}</span>
@@ -3043,337 +4610,398 @@ function ModulePage({ page, alertFeed }) {
         </section>
       ) : null}
 
-      {page.bridge && showControlTab ? (
-        <section className="featured-device-card">
-          <div className="featured-device-copy">
-            <span className="eyebrow">{page.bridge.eyebrow}</span>
-            <h3>{page.bridge.name}</h3>
-            <strong>{page.bridge.kind}</strong>
-            <p>{page.bridge.note}</p>
+      {renderUploadPanel()}
 
-            <div className="featured-now-playing">
-              <span>Bridge Status</span>
-              <strong>{liveBridgeConnectivity}</strong>
-              <p>{bridgeState?.serialDevice ?? "Waiting for serial device path"}</p>
-              <small>
-                {bridgeError
-                  ? `Bridge error: ${bridgeError}`
-                  : bridgeState?.error
-                    ? bridgeState.error
-                    : bridgeState?.lastSeen
-                      ? `Last line at ${new Date(bridgeState.lastSeen * 1000).toLocaleTimeString()}`
-                      : "No serial payload received yet"}
-              </small>
-            </div>
-          </div>
-
-          <div className="featured-device-facts">
-            <article className="featured-fact-card">
-              <span>Board</span>
-              <strong>{bridgeState?.boardId ?? "Unknown"}</strong>
-            </article>
-            <article className="featured-fact-card">
-              <span>Baudrate</span>
-              <strong>{bridgeState?.baudrate ?? "n/a"}</strong>
-            </article>
-            <article className="featured-fact-card">
-              <span>Lines Rx</span>
-              <strong>{bridgeState?.linesReceived ?? 0}</strong>
-            </article>
-          </div>
-
-          <div className="featured-device-actions">
-            <div className="device-status-pill">{liveBridgeConnectivity}</div>
-            <div className="featured-action-group">
-              <button className="ghost-pill" type="button" onClick={refreshBridgeStatus}>
-                Refresh Bridge
-              </button>
-            </div>
-
-            {page.bridge?.bAxisTuning ? (
-              <div className="volume-card b-axis-tune-card">
-                <span>B Axis Tune</span>
-                <strong>STM32 #02 Motion</strong>
-                <p>Home, scan travel, set travel length, set decel window, and move to a target position.</p>
-                <div className="b-axis-tune-grid">
-                  <div className="next-step-card b-axis-tune-field">
-                    <span>Travel Steps</span>
-                    <input
-                      type="number"
-                      value={bAxisTravelSteps}
-                      onChange={(event) => setBAxisTravelSteps(event.target.value)}
-                      disabled={bAxisCommandPending}
-                    />
-                    <button className="ghost-pill" type="button" onClick={applyBAxisTravel} disabled={bAxisCommandPending}>
-                      Apply Travel
-                    </button>
-                  </div>
-                  <div className="next-step-card b-axis-tune-field">
-                    <span>Decel Window</span>
-                    <input
-                      type="number"
-                      value={bAxisDecelWindowSteps}
-                      onChange={(event) => setBAxisDecelWindowSteps(event.target.value)}
-                      disabled={bAxisCommandPending}
-                    />
-                    <button className="ghost-pill" type="button" onClick={applyBAxisDecelWindow} disabled={bAxisCommandPending}>
-                      Apply Decel
-                    </button>
-                  </div>
-                  <div className="next-step-card b-axis-tune-field">
-                    <span>Goto Position</span>
-                    <input
-                      type="number"
-                      value={bAxisGotoPosition}
-                      onChange={(event) => setBAxisGotoPosition(event.target.value)}
-                      disabled={bAxisCommandPending}
-                    />
-                    <button className="ghost-pill" type="button" onClick={applyBAxisGoto} disabled={bAxisCommandPending}>
-                      Go To
-                    </button>
-                  </div>
-                </div>
-                <div className="featured-action-group b-axis-tune-actions">
-                  <button className="ghost-pill" type="button" onClick={homeBAxis} disabled={bAxisCommandPending}>
-                    Home B
-                  </button>
-                  <button className="ghost-pill" type="button" onClick={scanBAxisTravel} disabled={bAxisCommandPending}>
-                    Scan Travel
-                  </button>
-                  <button className="ghost-pill" type="button" onClick={() => sendBridgeTextCommand("status")} disabled={bAxisCommandPending}>
-                    Refresh Motion
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="volume-card servo-control-card">
-              <span>Servo Control</span>
-              <strong>STM32 #02 Servo</strong>
-              <div className="featured-action-group b-axis-tune-actions">
-                <button className="ghost-pill" type="button" onClick={refreshServoStatus} disabled={bAxisCommandPending}>
-                  Refresh All
-                </button>
-              </div>
+      {page.bridge && (showControlTab || showServoTab || !hasAquariumTabs) ? (
+        <section className="tv-control-grid">
+          {showServoTab || !hasAquariumTabs ? (
+          <div className="volume-card servo-control-card servo-control-card-compact">
               <div className="servo-dashboard-grid">
-                {servoDefinitions.map((servo) => {
+                {(() => {
+                  const fan1Servo = servoDefinitions.find((servo) => servo.key === "fan1");
+                  const fan2Servo = servoDefinitions.find((servo) => servo.key === "fan2");
+                  const pan1Servo = servoDefinitions.find((servo) => servo.key === "pan1");
+                  const pan2Servo = servoDefinitions.find((servo) => servo.key === "pan2");
+                  const otherServos = servoDefinitions.filter(
+                    (servo) => !["fan1", "fan2", "pan1", "pan2"].includes(servo.key),
+                  );
+                  const fan1State = fan1Servo ? servoStates[fan1Servo.key] : null;
+                  const fan2State = fan2Servo ? servoStates[fan2Servo.key] : null;
+                  const pan1State = pan1Servo ? servoStates[pan1Servo.key] : null;
+                  const pan2State = pan2Servo ? servoStates[pan2Servo.key] : null;
+                  const fan1Angle = fan1Servo
+                    ? (() => {
+                        const parsed = Number.parseInt(servoAngleInputs[fan1Servo.key] ?? "", 10);
+                        return Number.isFinite(parsed)
+                          ? clampServoDialValue(parsed, fan1Servo.min, fan1Servo.max)
+                          : clampServoDialValue(
+                              Number.isFinite(fan1State?.angle) ? fan1State.angle : 90,
+                              fan1Servo.min,
+                              fan1Servo.max,
+                            );
+                      })()
+                    : 0;
+                  const fan2Angle = fan2Servo
+                    ? (() => {
+                        const parsed = Number.parseInt(servoAngleInputs[fan2Servo.key] ?? "", 10);
+                        return Number.isFinite(parsed)
+                          ? clampServoDialValue(parsed, fan2Servo.min, fan2Servo.max)
+                          : clampServoDialValue(
+                              Number.isFinite(fan2State?.angle) ? fan2State.angle : 90,
+                              fan2Servo.min,
+                              fan2Servo.max,
+                            );
+                      })()
+                    : 0;
+                  const pan1Angle = pan1Servo
+                    ? (() => {
+                        const parsed = Number.parseInt(servoAngleInputs[pan1Servo.key] ?? "", 10);
+                        return Number.isFinite(parsed)
+                          ? clampServoDialValue(parsed, pan1Servo.min, pan1Servo.max)
+                          : clampServoDialValue(
+                              Number.isFinite(pan1State?.angle) ? pan1State.angle : 90,
+                              pan1Servo.min,
+                              pan1Servo.max,
+                            );
+                      })()
+                    : 0;
+                  const pan2Angle = pan2Servo
+                    ? (() => {
+                        const parsed = Number.parseInt(servoAngleInputs[pan2Servo.key] ?? "", 10);
+                        return Number.isFinite(parsed)
+                          ? clampServoDialValue(parsed, pan2Servo.min, pan2Servo.max)
+                          : clampServoDialValue(
+                              Number.isFinite(pan2State?.angle) ? pan2State.angle : 90,
+                              pan2Servo.min,
+                              pan2Servo.max,
+                            );
+                      })()
+                    : 0;
+
+                  return (
+                    <>
+                      {fan1Servo && fan2Servo ? (
+                        <article className="next-step-card servo-dashboard-card servo-dashboard-card-composite">
+                          <div className="servo-inline-row servo-inline-row-double">
+                            <div className="servo-inline-heading">
+                              <div className="servo-dashboard-title servo-inline-title">
+                                <span>Fan Wings</span>
+                              </div>
+                              {renderServoModeToggle("fans")}
+                            </div>
+                            <div className="servo-inline-split servo-inline-split-two">
+                              <div className="servo-inline-split-card">
+                                <strong className="servo-inline-split-title">Wing 1</strong>
+                                <div className="servo-inline-readout">
+                                  <strong>{Number.isFinite(fan1State?.angle) ? `${fan1State.angle}°` : "-"}</strong>
+                                </div>
+                                <label className="b-axis-tune-field servo-dashboard-field servo-inline-field">
+                                  <input
+                                    type="number"
+                                    min={fan1Servo.min}
+                                    max={fan1Servo.max}
+                                    step="1"
+                                    placeholder="deg"
+                                    value={servoAngleInputs[fan1Servo.key] ?? ""}
+                                    onChange={(event) => updateServoAngleInput(fan1Servo.key, event.target.value)}
+                                    disabled={bAxisCommandPending || servoControlModes.fans !== "manual"}
+                                  />
+                                </label>
+                                <button
+                                  className="ghost-pill servo-dashboard-apply"
+                                  type="button"
+                                  onClick={() => applyServoAngleCommand(fan1Servo.key, fan1Angle)}
+                                  disabled={bAxisCommandPending || servoControlModes.fans !== "manual"}
+                                >
+                                  Apply
+                                </button>
+                              </div>
+                              <div className="servo-inline-split-card">
+                                <strong className="servo-inline-split-title">Wing 2</strong>
+                                <div className="servo-inline-readout">
+                                  <strong>{Number.isFinite(fan2State?.angle) ? `${fan2State.angle}°` : "-"}</strong>
+                                </div>
+                                <label className="b-axis-tune-field servo-dashboard-field servo-inline-field">
+                                  <input
+                                    type="number"
+                                    min={fan2Servo.min}
+                                    max={fan2Servo.max}
+                                    step="1"
+                                    placeholder="deg"
+                                    value={servoAngleInputs[fan2Servo.key] ?? ""}
+                                    onChange={(event) => updateServoAngleInput(fan2Servo.key, event.target.value)}
+                                    disabled={bAxisCommandPending || servoControlModes.fans !== "manual"}
+                                  />
+                                </label>
+                                <button
+                                  className="ghost-pill servo-dashboard-apply"
+                                  type="button"
+                                  onClick={() => applyServoAngleCommand(fan2Servo.key, fan2Angle)}
+                                  disabled={bAxisCommandPending || servoControlModes.fans !== "manual"}
+                                >
+                                  Apply
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </article>
+                      ) : null}
+
+                      {pan1Servo && pan2Servo ? (
+                        <article className="next-step-card servo-dashboard-card servo-dashboard-card-composite">
+                          <div className="servo-inline-row servo-inline-row-double">
+                            <div className="servo-inline-heading">
+                              <div className="servo-dashboard-title servo-inline-title">
+                                <span>Robot Head</span>
+                              </div>
+                              {renderServoModeToggle("head")}
+                            </div>
+                            <div className="servo-inline-split servo-inline-split-two">
+                              <div className="servo-inline-split-card">
+                                <strong className="servo-inline-split-title">Pan 1</strong>
+                                <div className="servo-inline-readout">
+                                  <strong>{Number.isFinite(pan1State?.angle) ? `${pan1State.angle}°` : "-"}</strong>
+                                </div>
+                                <label className="b-axis-tune-field servo-dashboard-field servo-inline-field">
+                                  <input
+                                    type="number"
+                                    min={pan1Servo.min}
+                                    max={pan1Servo.max}
+                                    step="1"
+                                    placeholder="deg"
+                                    value={servoAngleInputs[pan1Servo.key] ?? ""}
+                                    onChange={(event) => updateServoAngleInput(pan1Servo.key, event.target.value)}
+                                    disabled={bAxisCommandPending || servoControlModes.head !== "manual"}
+                                  />
+                                </label>
+                                <button
+                                  className="ghost-pill servo-dashboard-apply"
+                                  type="button"
+                                  onClick={() => applyServoAngleCommand(pan1Servo.key, pan1Angle)}
+                                  disabled={bAxisCommandPending || servoControlModes.head !== "manual"}
+                                >
+                                  Apply
+                                </button>
+                              </div>
+                              <div className="servo-inline-split-card">
+                                <strong className="servo-inline-split-title">Pan 2</strong>
+                                <div className="servo-inline-readout">
+                                  <strong>{Number.isFinite(pan2State?.angle) ? `${pan2State.angle}°` : "-"}</strong>
+                                </div>
+                                <label className="b-axis-tune-field servo-dashboard-field servo-inline-field">
+                                  <input
+                                    type="number"
+                                    min={pan2Servo.min}
+                                    max={pan2Servo.max}
+                                    step="1"
+                                    placeholder="deg"
+                                    value={servoAngleInputs[pan2Servo.key] ?? ""}
+                                    onChange={(event) => updateServoAngleInput(pan2Servo.key, event.target.value)}
+                                    disabled={bAxisCommandPending || servoControlModes.head !== "manual"}
+                                  />
+                                </label>
+                                <button
+                                  className="ghost-pill servo-dashboard-apply"
+                                  type="button"
+                                  onClick={() => applyServoAngleCommand(pan2Servo.key, pan2Angle)}
+                                  disabled={bAxisCommandPending || servoControlModes.head !== "manual"}
+                                >
+                                  Apply
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </article>
+                      ) : null}
+
+                      {otherServos.map((servo) => {
                   const currentServoState = servoStates[servo.key];
                   const currentAngle = currentServoState?.angle;
                   const currentPulseUs = currentServoState?.pulseUs;
-                  const presets = [servo.min, 90, servo.max].filter(
-                    (angle, index, values) => angle >= servo.min && angle <= servo.max && values.indexOf(angle) === index,
-                  );
+                  const servoGlyph = renderServoGlyph(servo.key);
+                  const parsedInputAngle = Number.parseInt(servoAngleInputs[servo.key] ?? "", 10);
+                  const dialAngle = Number.isFinite(parsedInputAngle)
+                    ? clampServoDialValue(parsedInputAngle, servo.min, servo.max)
+                    : clampServoDialValue(Number.isFinite(currentAngle) ? currentAngle : 90, servo.min, servo.max);
+
+                      if (servo.key === "lid") {
+                        return (
+                          <article key={servo.key} className="next-step-card servo-dashboard-card servo-dashboard-card-composite">
+                            <div className="servo-inline-row servo-inline-row-single">
+                              <div className="servo-inline-heading">
+                                <div className="servo-dashboard-title servo-inline-title">
+                                  <span>{servo.label}</span>
+                                </div>
+                                {renderServoModeToggle("lid")}
+                              </div>
+                              <div className="servo-inline-split servo-inline-split-two servo-inline-split-lid">
+                                <div className="servo-inline-split-card servo-inline-split-card-lid">
+                                  <strong className="servo-inline-split-title">{servo.label}</strong>
+                                  <div className="servo-inline-readout">
+                                    <strong>{Number.isFinite(currentAngle) ? `${currentAngle}°` : "-"}</strong>
+                                  </div>
+                                  <label className="b-axis-tune-field servo-dashboard-field servo-inline-field">
+                                    <input
+                                      type="number"
+                                      min={servo.min}
+                                      max={servo.max}
+                                      step="1"
+                                      placeholder="deg"
+                                      value={servoAngleInputs[servo.key] ?? ""}
+                                      onChange={(event) => updateServoAngleInput(servo.key, event.target.value)}
+                                      disabled={bAxisCommandPending || servoControlModes.lid !== "manual"}
+                                    />
+                                  </label>
+                                  <button
+                                    className="ghost-pill servo-dashboard-apply"
+                                    type="button"
+                                    onClick={() => applyServoAngleCommand(servo.key, dialAngle)}
+                                    disabled={bAxisCommandPending || servoControlModes.lid !== "manual"}
+                                  >
+                                    Apply
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                      </article>
+                    );
+                  }
 
                   return (
                     <article key={servo.key} className="next-step-card servo-dashboard-card">
                       <div className="servo-dashboard-head">
                         <div>
-                          <span>{servo.label}</span>
-                          <strong>{Number.isFinite(currentAngle) ? `${currentAngle}°` : "Unknown"}</strong>
+                          <div className="servo-dashboard-title">
+                            {servoGlyph}
+                            <span>{servo.label}</span>
+                          </div>
+                          {Number.isFinite(currentAngle) ? <strong>{`${currentAngle}°`}</strong> : null}
                         </div>
-                        <p>{Number.isFinite(currentPulseUs) ? `${currentPulseUs} us` : "No status"}</p>
+                        {Number.isFinite(currentPulseUs) ? <p>{`${currentPulseUs} us`}</p> : null}
                       </div>
 
                       <div className="servo-dashboard-body">
-                        <label className="b-axis-tune-field servo-dashboard-field">
-                          <span>Angle</span>
-                          <input
-                            type="number"
-                            min={servo.min}
-                            max={servo.max}
-                            step="1"
-                            value={servoAngleInputs[servo.key] ?? ""}
-                            onChange={(event) => updateServoAngleInput(servo.key, event.target.value)}
-                            disabled={bAxisCommandPending}
-                          />
-                        </label>
+                        <ServoDial
+                          min={servo.min}
+                          max={servo.max}
+                          value={dialAngle}
+                          disabled={bAxisCommandPending}
+                          onChange={(nextAngle) => updateServoAngleInput(servo.key, String(nextAngle))}
+                        />
 
                         <button
                           className="ghost-pill servo-dashboard-apply"
                           type="button"
-                          onClick={() => applyServoAngleCommand(servo.key, servoAngleInputs[servo.key])}
+                          onClick={() => applyServoAngleCommand(servo.key, dialAngle)}
                           disabled={bAxisCommandPending}
                         >
                           Apply
                         </button>
                       </div>
-
-                      <div className="servo-dashboard-presets">
-                        {presets.map((angle) => (
-                          <button
-                            key={`${servo.key}-${angle}`}
-                            className="ghost-pill"
-                            type="button"
-                            onClick={() => {
-                              updateServoAngleInput(servo.key, String(angle));
-                              applyServoAngleCommand(servo.key, angle);
-                            }}
-                            disabled={bAxisCommandPending}
-                          >
-                            {angle}°
-                          </button>
-                        ))}
-                      </div>
                     </article>
                   );
-                })}
+                      })}
+
+                      <article className="next-step-card servo-dashboard-card">
+                        <div className="servo-dashboard-head byj-dashboard-head">
+                          <div>
+                            <span>Scraper</span>
+                            <strong>{byj1State?.moving ? "Moving" : "Idle"}</strong>
+                          </div>
+                          {renderByjModeToggle("scraper")}
+                        </div>
+
+                        <div className="byj-status-grid">
+                          <div className="next-step-card">
+                            <span>Position</span>
+                            <strong>{Math.round(byj1CurrentMm)} mm</strong>
+                          </div>
+                        </div>
+
+                        <div className="servo-dashboard-body">
+                          <label className="b-axis-tune-field servo-dashboard-field">
+                            <span>Target mm</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.001"
+                              value={byj1TargetMmInput}
+                              onChange={(event) => setByj1TargetMmInput(event.target.value)}
+                              disabled={bAxisCommandPending}
+                            />
+                          </label>
+
+                          <button
+                            className="ghost-pill servo-dashboard-apply"
+                            type="button"
+                            onClick={applyByj1GotoMm}
+                            disabled={bAxisCommandPending}
+                          >
+                            Apply
+                          </button>
+                        </div>
+
+                        <div className="servo-dashboard-presets">
+                          <button className="ghost-pill" type="button" onClick={homeByj1} disabled={bAxisCommandPending}>
+                            Home
+                          </button>
+                          <button className="ghost-pill" type="button" onClick={stopByj1} disabled={bAxisCommandPending}>
+                            Stop
+                          </button>
+                          <button className="ghost-pill" type="button" onClick={parkByj1} disabled={bAxisCommandPending}>
+                            Park
+                          </button>
+                        </div>
+                      </article>
+
+                      <article className="next-step-card servo-dashboard-card">
+                        <div className="servo-dashboard-head byj-dashboard-head">
+                          <div>
+                            <span>Feeder</span>
+                            <strong>{byj2State?.moving ? "Moving" : "Idle"}</strong>
+                          </div>
+                          {renderByjModeToggle("feeder")}
+                        </div>
+
+                        <div className="servo-dashboard-body">
+                          <label className="b-axis-tune-field servo-dashboard-field">
+                            <span>Step</span>
+                            <input
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={byj2StepInput}
+                              onChange={(event) => setByj2StepInput(event.target.value)}
+                              disabled={bAxisCommandPending}
+                            />
+                          </label>
+
+                          <button
+                            className="ghost-pill servo-dashboard-apply"
+                            type="button"
+                            onClick={byj2State?.moving ? pauseByj2 : runByj2Move}
+                            disabled={bAxisCommandPending}
+                          >
+                            {byj2State?.moving ? "Pause" : "Run"}
+                          </button>
+                        </div>
+
+                        <div className="servo-dashboard-presets">
+                          <button className="ghost-pill" type="button" onClick={() => jogByj2("+")} disabled={bAxisCommandPending}>
+                            Jog +
+                          </button>
+                          <button className="ghost-pill" type="button" onClick={() => jogByj2("-")} disabled={bAxisCommandPending}>
+                            Jog -
+                          </button>
+                        </div>
+                      </article>
+                    </>
+                  );
+                })()}
               </div>
-            </div>
-
-            <div className="volume-card servo-control-card">
-              <span>BYJ1 Control</span>
-              <strong>Home and absolute move in mm</strong>
-              <div className="servo-dashboard-grid">
-                <article className="next-step-card servo-dashboard-card">
-                  <div className="servo-dashboard-head">
-                    <div>
-                      <span>BYJ1 State</span>
-                      <strong>{byj1State?.moving ? "Moving" : "Idle"}</strong>
-                    </div>
-                    <p>{byj1State?.endstop === "trig" ? "Endstop trig" : "Endstop clear"}</p>
-                  </div>
-
-                  <div className="byj-status-grid">
-                    <div className="next-step-card">
-                      <span>Position</span>
-                      <strong>{byj1CurrentMm.toFixed(3)} mm</strong>
-                    </div>
-                    <div className="next-step-card">
-                      <span>Target</span>
-                      <strong>{byj1TargetMm.toFixed(3)} mm</strong>
-                    </div>
-                    <div className="next-step-card">
-                      <span>Steps</span>
-                      <strong>{byj1State?.pos ?? 0}</strong>
-                    </div>
-                    <div className="next-step-card">
-                      <span>Scale</span>
-                      <strong>42 mm / 50000 step</strong>
-                    </div>
-                  </div>
-
-                  <div className="servo-dashboard-body">
-                    <label className="b-axis-tune-field servo-dashboard-field">
-                      <span>Target mm</span>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        value={byj1TargetMmInput}
-                        onChange={(event) => setByj1TargetMmInput(event.target.value)}
-                        disabled={bAxisCommandPending}
-                      />
-                    </label>
-
-                    <button
-                      className="ghost-pill servo-dashboard-apply"
-                      type="button"
-                      onClick={applyByj1GotoMm}
-                      disabled={bAxisCommandPending}
-                    >
-                      Apply mm
-                    </button>
-                  </div>
-
-                  <div className="servo-dashboard-presets">
-                    <button className="ghost-pill" type="button" onClick={homeByj1} disabled={bAxisCommandPending}>
-                      Home BYJ1
-                    </button>
-                    <button className="ghost-pill" type="button" onClick={refreshByjStatus} disabled={bAxisCommandPending}>
-                      Refresh BYJ1
-                    </button>
-                  </div>
-                </article>
-
-                <article className="next-step-card servo-dashboard-card">
-                  <div className="servo-dashboard-head">
-                    <div>
-                      <span>BYJ2 State</span>
-                      <strong>{byj2State?.moving ? "Moving" : "Idle"}</strong>
-                    </div>
-                    <p>{byj2State?.enabled ? "Enabled" : "Disabled"}</p>
-                  </div>
-
-                  <div className="byj-status-grid">
-                    <div className="next-step-card">
-                      <span>Position</span>
-                      <strong>{byj2State?.pos ?? 0} step</strong>
-                    </div>
-                    <div className="next-step-card">
-                      <span>Target</span>
-                      <strong>{byj2State?.target ?? 0} step</strong>
-                    </div>
-                    <div className="next-step-card">
-                      <span>Velocity</span>
-                      <strong>{byj2State?.vel ?? 0}</strong>
-                    </div>
-                    <div className="next-step-card">
-                      <span>Direction</span>
-                      <strong>{byj2Direction}</strong>
-                    </div>
-                  </div>
-
-                  <div className="servo-dashboard-body">
-                    <label className="b-axis-tune-field servo-dashboard-field">
-                      <span>Step</span>
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={byj2StepInput}
-                        onChange={(event) => setByj2StepInput(event.target.value)}
-                        disabled={bAxisCommandPending}
-                      />
-                    </label>
-
-                    <div className="servo-dashboard-presets">
-                      <button
-                        className={`ghost-pill${byj2Direction === "+" ? " is-active" : ""}`}
-                        type="button"
-                        onClick={() => setByj2Direction("+")}
-                        disabled={bAxisCommandPending}
-                      >
-                        Dir +
-                      </button>
-                      <button
-                        className={`ghost-pill${byj2Direction === "-" ? " is-active" : ""}`}
-                        type="button"
-                        onClick={() => setByj2Direction("-")}
-                        disabled={bAxisCommandPending}
-                      >
-                        Dir -
-                      </button>
-                    </div>
-
-                    <button
-                      className="ghost-pill servo-dashboard-apply"
-                      type="button"
-                      onClick={runByj2Move}
-                      disabled={bAxisCommandPending}
-                    >
-                      Run
-                    </button>
-                  </div>
-
-                  <div className="servo-dashboard-presets">
-                    <button className="ghost-pill" type="button" onClick={pauseByj2} disabled={bAxisCommandPending}>
-                      Pause
-                    </button>
-                    <button className="ghost-pill" type="button" onClick={() => jogByj2("+")} disabled={bAxisCommandPending}>
-                      Jog +
-                    </button>
-                    <button className="ghost-pill" type="button" onClick={() => jogByj2("-")} disabled={bAxisCommandPending}>
-                      Jog -
-                    </button>
-                    <button className="ghost-pill" type="button" onClick={refreshByjStatus} disabled={bAxisCommandPending}>
-                      Refresh BYJ2
-                    </button>
-                  </div>
-                </article>
-              </div>
-            </div>
-
           </div>
+          ) : null}
+
         </section>
       ) : null}
 
@@ -3382,43 +5010,37 @@ function ModulePage({ page, alertFeed }) {
           ref={(element) => {
             sectionRefs.current.workspace = element;
           }}
-          className="featured-device-card ab-workspace-shell"
+          className="ab-workspace-shell"
         >
           <div className="ab-workspace-layout">
             <div className="ab-workspace-panel ab-workspace-side-panel ab-workspace-stats-panel">
               <div className="ab-workspace-stats">
-                <div className="next-step-card">
-                  <span>Selected A</span>
-                  <strong>{selectedABTarget?.aTargetMm ?? "-"} mm</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>Selected B</span>
-                  <strong>{selectedABTarget?.bTargetMm ?? "-"} mm</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>Axis A</span>
-                  <strong>{motionState.a?.homed ? "Homed" : "Not Homed"}</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>Axis B</span>
-                  <strong>{motionState.b?.homed ? "Homed" : "Not Homed"}</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>AB Motion</span>
-                  <strong>{anyAxisMoving ? "Moving" : "Idle"}</strong>
-                </div>
-                <div className="next-step-card">
-                  <span>Travel</span>
-                  <strong>{aTravelMm.toFixed(2)} / {bTravelMm.toFixed(2)} mm</strong>
-                </div>
               </div>
             </div>
 
             <div className="ab-workspace-panel ab-workspace-map-panel">
               <div className="ab-workspace-head">
-                <div className="device-status-pill">{anyAxisMoving ? "Moving" : "Idle"}</div>
+                <div className="ab-workspace-head-status">
+                  <div className="device-status-pill">{abMotionLabel}</div>
+                  <button
+                    type="button"
+                    className={`device-status-pill device-status-pill-button device-status-pill-state-${axisAStatusKey}`}
+                    onClick={homeAAxis}
+                    disabled={abCommandLocked}
+                  >
+                    {axisAStatusLabel}
+                  </button>
+                  <button
+                    type="button"
+                    className={`device-status-pill device-status-pill-button device-status-pill-state-${axisBStatusKey}`}
+                    onClick={homeBAxis}
+                    disabled={abCommandLocked}
+                  >
+                    {axisBStatusLabel}
+                  </button>
+                </div>
                 <strong>
-                  A {currentAMm.toFixed(2)} mm / B {currentBMm.toFixed(2)} mm
+                  A {effectiveTargetA.toFixed(2)} mm / B {effectiveTargetB.toFixed(2)} mm
                 </strong>
               </div>
               <ABWorkspaceMap
@@ -3431,6 +5053,8 @@ function ModulePage({ page, alertFeed }) {
                 selectedAMarker={selectedAMarker}
                 selectedBMarker={selectedBMarker}
                 onSelect={selectABTarget}
+                onApply={applyABTargetMm}
+                selectedState={selectedTargetState}
               />
             </div>
 
@@ -3444,6 +5068,7 @@ function ModulePage({ page, alertFeed }) {
                     min="0"
                     max={aTravelMm > 0 ? aTravelMm : undefined}
                     value={selectedATargetMmInput}
+                    disabled={abCommandLocked}
                     onChange={(event) => {
                       const nextA = event.target.value;
                       setSelectedATargetMmInput(nextA);
@@ -3465,6 +5090,7 @@ function ModulePage({ page, alertFeed }) {
                     min="0"
                     max={bTravelMm > 0 ? bTravelMm : undefined}
                     value={selectedBTargetMmInput}
+                    disabled={abCommandLocked}
                     onChange={(event) => {
                       const nextB = event.target.value;
                       setSelectedBTargetMmInput(nextB);
@@ -3490,11 +5116,11 @@ function ModulePage({ page, alertFeed }) {
                     setSelectedATargetMmInput(String(aTargetMm));
                     setSelectedBTargetMmInput(String(bTargetMm));
                   }}
-                  disabled={bAxisCommandPending}
+                  disabled={abCommandLocked}
                 >
                   Select Center
                 </button>
-                <button className="ghost-pill" type="button" onClick={sendABNowFromInputs} disabled={bAxisCommandPending}>
+                <button className="ghost-pill" type="button" onClick={sendABNowFromInputs} disabled={abCommandLocked}>
                   Apply
                 </button>
                 <button
@@ -3505,21 +5131,24 @@ function ModulePage({ page, alertFeed }) {
                     setSelectedATargetMmInput("");
                     setSelectedBTargetMmInput("");
                   }}
-                  disabled={bAxisCommandPending}
+                  disabled={abCommandLocked}
                 >
                   Clear
                 </button>
-                <button className="ghost-pill" type="button" onClick={homeAAxis} disabled={bAxisCommandPending}>
+                <button className="ghost-pill" type="button" onClick={homeAAxis} disabled={abCommandLocked}>
                   Home A
                 </button>
-                <button className="ghost-pill" type="button" onClick={homeBAxis} disabled={bAxisCommandPending}>
+                <button className="ghost-pill" type="button" onClick={homeBAxis} disabled={abCommandLocked}>
                   Home B
                 </button>
-                <button className="ghost-pill" type="button" onClick={scanAAxisTravel} disabled={bAxisCommandPending}>
+                <button className="ghost-pill" type="button" onClick={scanAAxisTravel} disabled={abCommandLocked}>
                   Scan A
                 </button>
-                <button className="ghost-pill" type="button" onClick={scanBAxisTravel} disabled={bAxisCommandPending}>
+                <button className="ghost-pill" type="button" onClick={scanBAxisTravel} disabled={abCommandLocked}>
                   Scan B
+                </button>
+                <button className="ghost-pill" type="button" onClick={parkABAxes} disabled={abCommandLocked}>
+                  Park
                 </button>
                 <button className="ghost-pill" type="button" onClick={stopABMotion} disabled={bAxisCommandPending}>
                   Stop All
@@ -3530,24 +5159,6 @@ function ModulePage({ page, alertFeed }) {
         </section>
       ) : null}
 
-      {page.bridge ? (
-        <section className="tv-control-grid">
-          <article className="tv-control-card">
-            <span className="eyebrow">Gateway Route</span>
-            <div className="chip-grid">
-              <button className="source-chip" type="button">
-                {page.bridge.apiPath}/status
-              </button>
-              <button className="source-chip" type="button">
-                {page.bridge.apiPath}/logs
-              </button>
-              <button className="source-chip" type="button">
-                {page.bridge.apiPath}/events
-              </button>
-            </div>
-          </article>
-        </section>
-      ) : null}
     </>
   );
 }

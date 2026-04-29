@@ -13,6 +13,9 @@ typedef struct
   uint16_t min_angle_deg;
   uint16_t max_angle_deg;
   uint16_t pulse_us;
+  uint16_t target_pulse_us;
+  uint8_t pwm_enabled;
+  uint32_t release_deadline_ms;
 } ServoState;
 
 void servo_init(void);

@@ -23,12 +23,12 @@ constexpr char kCommandTopic[] = "smarthome/living-room-node-02/command";
 constexpr char kStateTopic[] = "smarthome/living-room-node-02/state";
 
 // Edit these pins to match your wiring.
-constexpr uint8_t kRelay1Pin = 16;
-constexpr uint8_t kRelay2Pin = 14;
-constexpr uint8_t kTouch1Pin = 12;
+constexpr uint8_t kRelay1Pin = 15;
+constexpr uint8_t kRelay2Pin = 16;
+constexpr uint8_t kTouch1Pin = 4;
 constexpr uint8_t kTouch2Pin = 13;
-constexpr uint8_t kLed1Pin = 4;
-constexpr uint8_t kLed2Pin = 5;
+constexpr uint8_t kLed1Pin = 5;
+constexpr uint8_t kLed2Pin = 12;
 
 // Change these if your relay or touch boards use opposite logic.
 constexpr bool kRelay1ActiveHigh = true;
@@ -42,6 +42,4 @@ constexpr uint8_t kLedBreathEndHour = 6;
 constexpr uint16_t kLedBreathPeriodMs = 4200;
 
 constexpr uint32_t kTelemetryIntervalMs = 5000;
-constexpr uint32_t kTouchDebounceMs = 80;
-
 }  // namespace
