@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Home Web Dashboard
+After=network-online.target smart-home-api.service
+Wants=network-online.target smart-home-api.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/trungcoolboy/SmartHome/backend
+ExecStart=/usr/bin/python3 /home/trungcoolboy/SmartHome/backend/smart_home_web.py --host 0.0.0.0 --port 8080 --api-port 8090 --dist-dir /home/trungcoolboy/SmartHome/frontend/dist
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

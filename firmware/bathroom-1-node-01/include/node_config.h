@@ -9,7 +9,7 @@ constexpr char kNodeId[] = "bathroom-1-node-01";
 constexpr char kWifiSsid[] = "Ludwig van Beethoven";
 constexpr char kWifiPassword[] = "Anhtrung123";
 
-constexpr char kMqttHost[] = "192.168.1.253";
+constexpr char kMqttHost[] = "192.168.1.182";
 constexpr uint16_t kMqttPort = 1883;
 constexpr char kMqttUsername[] = "";
 constexpr char kMqttPassword[] = "";
