@@ -112,7 +112,7 @@ int iar_fputc(int ch);
 #endif /* __ICCARM__ */
 
 static void uart_write_line(const char *text);
-static void apply_relay_outputs(void);
+static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
 static ControlChannel *find_channel(const char *group, const char *key);
@@ -126,34 +126,12 @@ static void uart_write_line(const char *text)
   printf("%s\r\n", text);
 }
 
-static void apply_relay_outputs(void)
+static void apply_relay_output(const ControlChannel *channel)
 {
-  size_t i;
-  GPIO_PinState pin_state;
-
-  for (i = 0U; i < sizeof(pump_channels) / sizeof(pump_channels[0]); i++)
-  {
-    pin_state = pump_channels[i].output_on
-      ? (pump_channels[i].active_low ? GPIO_PIN_RESET : GPIO_PIN_SET)
-      : (pump_channels[i].active_low ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(
-      pump_channels[i].port,
-      pump_channels[i].pin,
-      pin_state
-    );
-  }
-
-  for (i = 0U; i < sizeof(misc_channels) / sizeof(misc_channels[0]); i++)
-  {
-    pin_state = misc_channels[i].output_on
-      ? (misc_channels[i].active_low ? GPIO_PIN_RESET : GPIO_PIN_SET)
-      : (misc_channels[i].active_low ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(
-      misc_channels[i].port,
-      misc_channels[i].pin,
-      pin_state
-    );
-  }
+  const GPIO_PinState pin_state = channel->output_on
+    ? (channel->active_low ? GPIO_PIN_RESET : GPIO_PIN_SET)
+    : (channel->active_low ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(channel->port, channel->pin, pin_state);
 }
 
 static void emit_control_state(const ControlChannel *channel)
@@ -269,7 +247,7 @@ static void process_command_line(char *line)
     {
       channel->auto_mode = 1U;
       channel->output_on = 0U;
-      apply_relay_outputs();
+      apply_relay_output(channel);
       printf("ok %s %s mode auto\r\n", channel->group, channel->key);
       emit_control_state(channel);
       return;
@@ -279,7 +257,7 @@ static void process_command_line(char *line)
     {
       channel->auto_mode = 0U;
       channel->output_on = 0U;
-      apply_relay_outputs();
+      apply_relay_output(channel);
       printf("ok %s %s mode manual\r\n", channel->group, channel->key);
       emit_control_state(channel);
       return;
@@ -298,7 +276,7 @@ static void process_command_line(char *line)
     }
 
     channel->output_on = (strcmp(tokens[2], "on") == 0) ? 1U : 0U;
-    apply_relay_outputs();
+    apply_relay_output(channel);
     printf("ok %s %s %s\r\n", channel->group, channel->key, channel->output_on ? "on" : "off");
     emit_control_state(channel);
     return;

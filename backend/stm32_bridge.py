@@ -79,7 +79,7 @@ class BridgeState:
                 except (IndexError, ValueError):
                     pass
             state_match = re.match(
-                r"^state\s+(pump|misc)\s+([a-z0-9_]+)\s+mode\s+(auto|manual)\s+output\s+(on|off)$",
+                r"^state\s+(pump|misc)\s+([a-z0-9_]+)\s+mode\s+(auto|manual)\s+\S+\s+(on|off)$",
                 line,
                 re.IGNORECASE,
             )

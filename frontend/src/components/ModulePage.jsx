@@ -782,6 +782,7 @@ function ModulePage({ page, alertFeed }) {
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
+  const [pendingAquariumControl, setPendingAquariumControl] = useState("");
   const [uploadItems, setUploadItems] = useState([]);
   const [uploadError, setUploadError] = useState("");
   const [uploadInfo, setUploadInfo] = useState("");
@@ -3692,18 +3693,12 @@ function ModulePage({ page, alertFeed }) {
 
     window.setTimeout(async () => {
       try {
-        const response = await fetch(`${baseUrl}/send`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: "status" }),
-        });
+        const response = await fetch(`${baseUrl}/status`);
         const payload = await response.json();
         if (!response.ok) {
           throw new Error(payload.error || `status ${response.status}`);
         }
-        if (payload.state) {
-          applyBridgeSnapshotToControls(payload.state);
-        }
+        applyBridgeSnapshotToControls(payload);
       } catch (error) {
         setBridgeError(error.message);
       }
@@ -3712,10 +3707,11 @@ function ModulePage({ page, alertFeed }) {
 
   async function sendPumpCommand(item, commandText, onSuccess) {
     const baseUrl = getPumpBaseUrl();
-    if (!baseUrl) {
+    if (!baseUrl || pendingAquariumControl) {
       return;
     }
 
+    setPendingAquariumControl(commandText);
     try {
       const response = await fetch(`${baseUrl}/send`, {
         method: "POST",
@@ -3733,6 +3729,10 @@ function ModulePage({ page, alertFeed }) {
       requestPumpStatus(1000);
     } catch (error) {
       setBridgeError(`${item.label}: ${error.message}`);
+    } finally {
+      window.setTimeout(() => {
+        setPendingAquariumControl((current) => (current === commandText ? "" : current));
+      }, 1000);
     }
   }
 
@@ -3787,12 +3787,22 @@ function ModulePage({ page, alertFeed }) {
   }
 
   function handleMiscModeChange(item, mode) {
+    const misc = miscStates[item.id];
+    if (misc?.mode === mode) {
+      return;
+    }
+
     sendPumpCommand(item, `misc ${item.key} mode ${mode}`, () => {
       setMiscMode(item.id, mode);
     });
   }
 
   function handleMiscPowerChange(item, state) {
+    const misc = miscStates[item.id];
+    if (!misc || misc.mode !== "manual" || misc.state === state) {
+      return;
+    }
+
     sendPumpCommand(item, `misc ${item.key} ${state}`);
   }
 
@@ -3963,6 +3973,7 @@ function ModulePage({ page, alertFeed }) {
                       {page.pumpControl.items.map((item) => {
                         const pump = pumpStates[item.id] ?? { mode: item.mode ?? "auto", state: item.state ?? "off" };
                         const isManual = pump.mode === "manual";
+                        const controlsPending = Boolean(pendingAquariumControl);
                           return (
                             <div key={item.id} className="pump-row">
                               <div className="pump-copy">
@@ -3973,6 +3984,7 @@ function ModulePage({ page, alertFeed }) {
                                 <button
                                   className={`pump-toggle-button ${pump.mode === "auto" ? "active" : ""}`}
                                   type="button"
+                                  disabled={controlsPending}
                                   onClick={() => handlePumpModeChange(item, "auto")}
                                 >
                                   Auto
@@ -3980,6 +3992,7 @@ function ModulePage({ page, alertFeed }) {
                                 <button
                                   className={`pump-toggle-button ${pump.mode === "manual" ? "active" : ""}`}
                                   type="button"
+                                  disabled={controlsPending}
                                   onClick={() => handlePumpModeChange(item, "manual")}
                                 >
                                   Manual
@@ -3989,7 +4002,7 @@ function ModulePage({ page, alertFeed }) {
                                 <button
                                   className={`pump-power-button on ${pump.state === "on" ? "active" : ""}`}
                                   type="button"
-                                  disabled={!isManual}
+                                  disabled={!isManual || controlsPending}
                                   onClick={() => handlePumpPowerChange(item, "on")}
                                 >
                                   On
@@ -3997,7 +4010,7 @@ function ModulePage({ page, alertFeed }) {
                                 <button
                                   className={`pump-power-button off ${pump.state === "off" ? "active" : ""}`}
                                   type="button"
-                                  disabled={!isManual}
+                                  disabled={!isManual || controlsPending}
                                   onClick={() => handlePumpPowerChange(item, "off")}
                                 >
                                   Off
@@ -4016,6 +4029,7 @@ function ModulePage({ page, alertFeed }) {
                         {page.miscControl.items.map((item) => {
                           const misc = miscStates[item.id] ?? { mode: item.mode ?? "auto", state: item.state ?? "off" };
                           const isManual = misc.mode === "manual";
+                          const controlsPending = Boolean(pendingAquariumControl);
                           return (
                             <div key={item.id} className="pump-row">
                               <div className="pump-copy">
@@ -4026,6 +4040,7 @@ function ModulePage({ page, alertFeed }) {
                                   <button
                                     className={`pump-toggle-button ${misc.mode === "auto" ? "active" : ""}`}
                                     type="button"
+                                    disabled={controlsPending}
                                     onClick={() => handleMiscModeChange(item, "auto")}
                                   >
                                     Auto
@@ -4033,6 +4048,7 @@ function ModulePage({ page, alertFeed }) {
                                   <button
                                     className={`pump-toggle-button ${misc.mode === "manual" ? "active" : ""}`}
                                     type="button"
+                                    disabled={controlsPending}
                                     onClick={() => handleMiscModeChange(item, "manual")}
                                   >
                                     Manual
@@ -4042,7 +4058,7 @@ function ModulePage({ page, alertFeed }) {
                                   <button
                                     className={`pump-power-button on ${misc.state === "on" ? "active" : ""}`}
                                     type="button"
-                                    disabled={!isManual}
+                                    disabled={!isManual || controlsPending}
                                     onClick={() => handleMiscPowerChange(item, "on")}
                                   >
                                     On
@@ -4050,7 +4066,7 @@ function ModulePage({ page, alertFeed }) {
                                   <button
                                     className={`pump-power-button off ${misc.state === "off" ? "active" : ""}`}
                                     type="button"
-                                    disabled={!isManual}
+                                    disabled={!isManual || controlsPending}
                                     onClick={() => handleMiscPowerChange(item, "off")}
                                   >
                                     Off

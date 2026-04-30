@@ -56,6 +56,9 @@ class Stm32Runtime:
     cached_status: dict[str, Any] | None = None
     cached_status_at: float = 0.0
     cached_logs: dict[int, tuple[float, dict[str, Any]]] = field(default_factory=dict)
+    command_guard_lock: threading.Lock = field(default_factory=threading.Lock)
+    last_control_command_at: dict[str, float] = field(default_factory=dict)
+    last_status_refresh_at: float = 0.0
 
 
 @dataclass
@@ -832,6 +835,17 @@ class Handler(BaseHTTPRequestHandler):
                     runtime.cached_status = runtime.state.snapshot()
                     runtime.cached_status_at = now
                 payload = runtime.cached_status
+            monotonic_now = time.monotonic()
+            if (
+                monotonic_now - runtime.last_status_refresh_at >= 5.0
+                and monotonic_now - runtime.bridge.last_write_ts >= 1.0
+            ):
+                try:
+                    runtime.bridge.send_text("status")
+                    runtime.sse_hub.publish({"type": "tx", "payload": "status", "ts": time.time()})
+                    runtime.last_status_refresh_at = monotonic_now
+                except Exception:
+                    pass
             self._json(HTTPStatus.OK, payload)
             return
         if parsed.path == f"{runtime.route_prefix}/logs":
@@ -867,9 +881,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "expected JSON body with text"})
             return
         normalized_text = " ".join(text.strip().split()).lower()
-        if normalized_text == "status" and time.monotonic() - runtime.bridge.last_write_ts < 1.0:
+        if normalized_text == "status":
             self._json(HTTPStatus.OK, {"ok": True, "sent": text, "deferred": True, "state": runtime.state.snapshot()})
             return
+        command_parts = normalized_text.split()
+        if len(command_parts) >= 3 and command_parts[0] in {"pump", "misc"}:
+            control_id = f"{command_parts[0]}.{command_parts[1]}"
+            control = runtime.state.snapshot().get("controls", {}).get(control_id)
+            if command_parts[2] == "mode" and len(command_parts) >= 4 and control and control.get("mode") == command_parts[3]:
+                self._json(HTTPStatus.OK, {"ok": True, "sent": text, "deferred": True, "state": runtime.state.snapshot()})
+                return
+            if command_parts[2] in {"on", "off"} and control and control.get("state") == command_parts[2]:
+                self._json(HTTPStatus.OK, {"ok": True, "sent": text, "deferred": True, "state": runtime.state.snapshot()})
+                return
+            with runtime.command_guard_lock:
+                now = time.monotonic()
+                last_at = runtime.last_control_command_at.get(control_id, 0.0)
+                if now - last_at < 2.5:
+                    self._json(
+                        HTTPStatus.OK,
+                        {"ok": True, "sent": text, "deferred": True, "reason": "cooldown", "state": runtime.state.snapshot()},
+                    )
+                    return
+                runtime.last_control_command_at[control_id] = now
         try:
             runtime.bridge.send_text(text)
         except Exception as exc:
