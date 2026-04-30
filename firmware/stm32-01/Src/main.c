@@ -115,6 +115,7 @@ static void uart_write_line(const char *text);
 static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
+static void emit_status_snapshot(void);
 static ControlChannel *find_channel(const char *group, const char *key);
 static void process_command_line(char *line);
 /* USER CODE END PFP */
@@ -153,6 +154,23 @@ static void emit_sensor_state(const SensorChannel *sensor)
     sensor->key,
     (pin_state == GPIO_PIN_RESET) ? "wet" : "dry"
   );
+}
+
+static void emit_status_snapshot(void)
+{
+  size_t i;
+  for (i = 0U; i < sizeof(pump_channels) / sizeof(pump_channels[0]); i++)
+  {
+    emit_control_state(&pump_channels[i]);
+  }
+  for (i = 0U; i < sizeof(misc_channels) / sizeof(misc_channels[0]); i++)
+  {
+    emit_control_state(&misc_channels[i]);
+  }
+  for (i = 0U; i < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]); i++)
+  {
+    emit_sensor_state(&water_level_sensors[i]);
+  }
 }
 
 static ControlChannel *find_channel(const char *group, const char *key)
@@ -206,19 +224,7 @@ static void process_command_line(char *line)
 
   if (strcmp(tokens[0], "status") == 0)
   {
-    size_t i;
-    for (i = 0U; i < sizeof(pump_channels) / sizeof(pump_channels[0]); i++)
-    {
-      emit_control_state(&pump_channels[i]);
-    }
-    for (i = 0U; i < sizeof(misc_channels) / sizeof(misc_channels[0]); i++)
-    {
-      emit_control_state(&misc_channels[i]);
-    }
-    for (i = 0U; i < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]); i++)
-    {
-      emit_sensor_state(&water_level_sensors[i]);
-    }
+    emit_status_snapshot();
     return;
   }
 
@@ -339,6 +345,7 @@ int main(void)
     static char rx_line[96];
     static size_t rx_len = 0U;
     static uint32_t last_led_toggle_ms = 0U;
+    static uint32_t last_status_emit_ms = 0U;
     const uint32_t now_ms = HAL_GetTick();
 
     if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE))
@@ -381,6 +388,11 @@ int main(void)
     {
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       last_led_toggle_ms = now_ms;
+    }
+    if (now_ms - last_status_emit_ms >= 2000U)
+    {
+      emit_status_snapshot();
+      last_status_emit_ms = now_ms;
     }
     /* USER CODE END WHILE */
 

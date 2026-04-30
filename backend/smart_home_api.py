@@ -835,17 +835,6 @@ class Handler(BaseHTTPRequestHandler):
                     runtime.cached_status = runtime.state.snapshot()
                     runtime.cached_status_at = now
                 payload = runtime.cached_status
-            monotonic_now = time.monotonic()
-            if (
-                monotonic_now - runtime.last_status_refresh_at >= 5.0
-                and monotonic_now - runtime.bridge.last_write_ts >= 1.0
-            ):
-                try:
-                    runtime.bridge.send_text("status")
-                    runtime.sse_hub.publish({"type": "tx", "payload": "status", "ts": time.time()})
-                    runtime.last_status_refresh_at = monotonic_now
-                except Exception:
-                    pass
             self._json(HTTPStatus.OK, payload)
             return
         if parsed.path == f"{runtime.route_prefix}/logs":
