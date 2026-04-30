@@ -866,6 +866,10 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "expected JSON body with text"})
             return
+        normalized_text = " ".join(text.strip().split()).lower()
+        if normalized_text == "status" and time.monotonic() - runtime.bridge.last_write_ts < 1.0:
+            self._json(HTTPStatus.OK, {"ok": True, "sent": text, "deferred": True, "state": runtime.state.snapshot()})
+            return
         try:
             runtime.bridge.send_text(text)
         except Exception as exc:

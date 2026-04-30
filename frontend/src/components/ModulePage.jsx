@@ -3692,11 +3692,18 @@ function ModulePage({ page, alertFeed }) {
 
     window.setTimeout(async () => {
       try {
-        await fetch(`${baseUrl}/send`, {
+        const response = await fetch(`${baseUrl}/send`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: "status" }),
         });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `status ${response.status}`);
+        }
+        if (payload.state) {
+          applyBridgeSnapshotToControls(payload.state);
+        }
       } catch (error) {
         setBridgeError(error.message);
       }
@@ -3723,19 +3730,29 @@ function ModulePage({ page, alertFeed }) {
         onSuccess();
       }
       setBridgeError("");
-      requestPumpStatus(120);
+      requestPumpStatus(1000);
     } catch (error) {
       setBridgeError(`${item.label}: ${error.message}`);
     }
   }
 
   function handlePumpModeChange(item, mode) {
+    const pump = pumpStates[item.id];
+    if (pump?.mode === mode) {
+      return;
+    }
+
     sendPumpCommand(item, `pump ${item.key} mode ${mode}`, () => {
       setPumpMode(item.id, mode);
     });
   }
 
   function handlePumpPowerChange(item, state) {
+    const pump = pumpStates[item.id];
+    if (!pump || pump.mode !== "manual" || pump.state === state) {
+      return;
+    }
+
     sendPumpCommand(item, `pump ${item.key} ${state}`);
   }
 
