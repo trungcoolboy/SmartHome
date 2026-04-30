@@ -1982,6 +1982,101 @@ function ModulePage({ page, alertFeed }) {
   }, [page.bridge?.apiPath, page.pumpControl?.apiPath]);
 
   useEffect(() => {
+    const pumpApiPath = page.pumpControl?.apiPath;
+    if (!pumpApiPath || pumpApiPath === page.bridge?.apiPath) {
+      return;
+    }
+
+    const baseUrl = getPumpBaseUrl();
+    let cancelled = false;
+    let eventSource = null;
+    let statusInFlight = false;
+
+    async function loadPumpStatus(options = {}) {
+      const preserveError = options.preserveError === true;
+      if (statusInFlight) {
+        return;
+      }
+      statusInFlight = true;
+      try {
+        const response = await fetch(`${baseUrl}/status`);
+        if (!response.ok) {
+          throw new Error(`status ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!cancelled) {
+          applyBridgeSnapshotToControls(payload);
+          if (!preserveError) {
+            setBridgeError("");
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setBridgeError(error.message);
+        }
+      } finally {
+        statusInFlight = false;
+      }
+    }
+
+    function connectPumpEvents() {
+      if (cancelled) {
+        return;
+      }
+
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+
+      eventSource = new EventSource(`${baseUrl}/events`);
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (cancelled) {
+            return;
+          }
+          if (payload.type === "snapshot" && payload.state) {
+            applyBridgeSnapshotToControls(payload.state);
+            setBridgeError("");
+          }
+          if (payload.type === "rx" && payload.payload) {
+            applyBridgeLinesToControls([payload.payload]);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setBridgeError(error.message);
+          }
+        }
+      };
+      eventSource.onerror = () => {
+        if (!cancelled) {
+          eventSource.close();
+          eventSource = null;
+          window.setTimeout(() => {
+            loadPumpStatus({ preserveError: true });
+            connectPumpEvents();
+          }, 2000);
+        }
+      };
+    }
+
+    loadPumpStatus();
+    connectPumpEvents();
+    const timer = window.setInterval(() => {
+      loadPumpStatus({ preserveError: true });
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      if (eventSource) {
+        eventSource.close();
+      }
+      window.clearInterval(timer);
+    };
+  }, [page.pumpControl?.apiPath, page.bridge?.apiPath]);
+
+  useEffect(() => {
     const baseUrl = getRoomNodeBaseUrl();
     if (!baseUrl) {
       setRoomNodeState(null);
