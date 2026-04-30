@@ -64,7 +64,7 @@ static ControlChannel pump_channels[] = {
   {"pump", "circulation", CIRCULATION_PUMP_GPIO_Port, CIRCULATION_PUMP_Pin, 1U, 1U, 0U},
   {"pump", "middle", MIDDLE_PUMP_GPIO_Port, MIDDLE_PUMP_Pin, 1U, 1U, 0U},
   {"pump", "filter", FILTER_PUMP_GPIO_Port, FILTER_PUMP_Pin, 0U, 1U, 0U},
-  {"pump", "drain", DRAIN_PUMP_GPIO_Port, DRAIN_PUMP_Pin, 0U, 1U, 0U},
+  {"pump", "drain", DRAIN_PUMP_GPIO_Port, DRAIN_PUMP_Pin, 1U, 1U, 0U},
 };
 
 static ControlChannel misc_channels[] = {
@@ -511,8 +511,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
   HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, IN_PUMP_Pin|OUT_PUMP_Pin|CIRCULATION_PUMP_Pin|MIDDLE_PUMP_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOB, FILTER_PUMP_Pin|DRAIN_PUMP_Pin|OXYGEN_RELAY_Pin|CO2_RELAY_Pin|TANK_HEATER_RELAY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, IN_PUMP_Pin|OUT_PUMP_Pin|CIRCULATION_PUMP_Pin|MIDDLE_PUMP_Pin|DRAIN_PUMP_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, FILTER_PUMP_Pin|OXYGEN_RELAY_Pin|CO2_RELAY_Pin|TANK_HEATER_RELAY_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOC, PRETREAT_HEATER_RELAY_Pin|WATER_INLET_RELAY_Pin, GPIO_PIN_SET);
 
   GPIO_InitStruct.Pin = LED2_Pin;
