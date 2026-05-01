@@ -426,7 +426,7 @@ int main(void)
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       last_led_toggle_ms = now_ms;
     }
-    if (now_ms - last_status_emit_ms >= 2000U)
+    if (now_ms - last_status_emit_ms >= 1000U)
     {
       status_emit_active = 1U;
       status_emit_index = 0U;

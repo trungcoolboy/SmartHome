@@ -1152,12 +1152,12 @@ button {
 }
 
 .sensor-chart-segment.wet {
-  border-color: rgba(119, 224, 207, 0.2);
-  background: rgba(119, 224, 207, 0.1);
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(22, 163, 74, 0.34);
 }
 
 .sensor-chart-segment.wet .sensor-chart-state {
-  color: #77e0cf;
+  color: #bbf7d0;
 }
 
 .sensor-chart-segment.dry {
