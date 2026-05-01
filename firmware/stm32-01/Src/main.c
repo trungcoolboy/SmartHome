@@ -262,18 +262,10 @@ static int32_t filter_temperature_centi_c(TemperatureChannel *sensor, int32_t ce
   }
 
   centi_c += sensor->offset_centi_c;
+  sensor->filtered_centi_c = centi_c;
+  sensor->filter_ready = 1U;
 
-  if (sensor->filter_ready == 0U)
-  {
-    sensor->filtered_centi_c = centi_c;
-    sensor->filter_ready = 1U;
-  }
-  else
-  {
-    sensor->filtered_centi_c += (centi_c - sensor->filtered_centi_c) / 8;
-  }
-
-  return sensor->filtered_centi_c;
+  return centi_c;
 }
 
 static void emit_temperature_state(TemperatureChannel *sensor)
