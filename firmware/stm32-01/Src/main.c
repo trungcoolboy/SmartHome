@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +46,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
+ADC_HandleTypeDef hadc1;
 
 /* USER CODE BEGIN PV */
 typedef struct
@@ -82,6 +84,12 @@ typedef struct
   uint16_t pin;
 } SensorChannel;
 
+typedef struct
+{
+  const char *key;
+  uint32_t adc_channel;
+} TemperatureChannel;
+
 static const SensorChannel water_level_sensors[] = {
   {"tank_low", TANK_LOW_SENSOR_GPIO_Port, TANK_LOW_SENSOR_Pin},
   {"tank_normal", TANK_NORMAL_SENSOR_GPIO_Port, TANK_NORMAL_SENSOR_Pin},
@@ -93,11 +101,19 @@ static const SensorChannel water_level_sensors[] = {
   {"waste_low", WASTE_LOW_SENSOR_GPIO_Port, WASTE_LOW_SENSOR_Pin},
   {"waste_high", WASTE_HIGH_SENSOR_GPIO_Port, WASTE_HIGH_SENSOR_Pin},
 };
+
+static const TemperatureChannel temperature_sensors[] = {
+  {"tank_front_temp", ADC_CHANNEL_6},
+  {"tank_end_temp", ADC_CHANNEL_7},
+  {"pretreat_temp", ADC_CHANNEL_8},
+  {"pretreat_block_temp", ADC_CHANNEL_9},
+};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_ADC1_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 #if defined(__ICCARM__)
@@ -115,6 +131,9 @@ static void uart_write_line(const char *text);
 static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
+static uint32_t read_adc_channel(uint32_t channel);
+static int32_t ntc_raw_to_centi_c(uint32_t raw);
+static void emit_temperature_state(const TemperatureChannel *sensor);
 static void emit_status_snapshot(void);
 static size_t status_snapshot_item_count(void);
 static void emit_status_snapshot_item(size_t index);

@@ -31,6 +31,8 @@ C_SOURCES := \
 	Src/stm32g4xx_it.c \
 	Src/system_stm32g4xx.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal.c \
+	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_adc.c \
+	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_adc_ex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_cortex.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_dma.c \
 	$(VENDOR)/Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_dma_ex.c \

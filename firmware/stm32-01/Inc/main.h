@@ -51,6 +51,7 @@ extern "C" {
 
 /* Exported functions prototypes ---------------------------------------------*/
 extern UART_HandleTypeDef huart1;
+extern ADC_HandleTypeDef hadc1;
 
 void Error_Handler(void);
 
@@ -104,6 +105,14 @@ void Error_Handler(void);
 #define WASTE_LOW_SENSOR_GPIO_Port GPIOB
 #define WASTE_HIGH_SENSOR_Pin GPIO_PIN_9
 #define WASTE_HIGH_SENSOR_GPIO_Port GPIOB
+#define TANK_FRONT_TEMP_Pin GPIO_PIN_0
+#define TANK_FRONT_TEMP_GPIO_Port GPIOC
+#define TANK_END_TEMP_Pin GPIO_PIN_1
+#define TANK_END_TEMP_GPIO_Port GPIOC
+#define PRETREAT_TEMP_Pin GPIO_PIN_2
+#define PRETREAT_TEMP_GPIO_Port GPIOC
+#define PRETREAT_BLOCK_TEMP_Pin GPIO_PIN_3
+#define PRETREAT_BLOCK_TEMP_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 
