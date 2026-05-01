@@ -116,6 +116,7 @@ static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
 static void emit_status_snapshot(void);
+static void emit_sensor_snapshot(void);
 static ControlChannel *find_channel(const char *group, const char *key);
 static void process_command_line(char *line);
 /* USER CODE END PFP */
@@ -167,6 +168,15 @@ static void emit_status_snapshot(void)
   {
     emit_control_state(&misc_channels[i]);
   }
+  for (i = 0U; i < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]); i++)
+  {
+    emit_sensor_state(&water_level_sensors[i]);
+  }
+}
+
+static void emit_sensor_snapshot(void)
+{
+  size_t i;
   for (i = 0U; i < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]); i++)
   {
     emit_sensor_state(&water_level_sensors[i]);
@@ -345,6 +355,7 @@ int main(void)
     static char rx_line[96];
     static size_t rx_len = 0U;
     static uint32_t last_led_toggle_ms = 0U;
+    static uint32_t last_sensor_emit_ms = 0U;
     const uint32_t now_ms = HAL_GetTick();
 
     if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE))
@@ -387,6 +398,11 @@ int main(void)
     {
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       last_led_toggle_ms = now_ms;
+    }
+    if (now_ms - last_sensor_emit_ms >= 2000U)
+    {
+      emit_sensor_snapshot();
+      last_sensor_emit_ms = now_ms;
     }
     /* USER CODE END WHILE */
 
@@ -495,7 +511,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
   HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, IN_PUMP_Pin|OUT_PUMP_Pin|CIRCULATION_PUMP_Pin|MIDDLE_PUMP_Pin|DRAIN_PUMP_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(IN_PUMP_GPIO_Port, IN_PUMP_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, LEGACY_IN_PUMP_OFF_Pin|OUT_PUMP_Pin|CIRCULATION_PUMP_Pin|MIDDLE_PUMP_Pin|DRAIN_PUMP_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOB, FILTER_PUMP_Pin|OXYGEN_RELAY_Pin|CO2_RELAY_Pin|TANK_HEATER_RELAY_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOC, PRETREAT_HEATER_RELAY_Pin|WATER_INLET_RELAY_Pin, GPIO_PIN_SET);
 
@@ -505,8 +522,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED2_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = IN_PUMP_Pin|OUT_PUMP_Pin|CIRCULATION_PUMP_Pin|MIDDLE_PUMP_Pin|FILTER_PUMP_Pin|
-                        DRAIN_PUMP_Pin|OXYGEN_RELAY_Pin|CO2_RELAY_Pin|TANK_HEATER_RELAY_Pin;
+  GPIO_InitStruct.Pin = IN_PUMP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(IN_PUMP_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = LEGACY_IN_PUMP_OFF_Pin|OUT_PUMP_Pin|CIRCULATION_PUMP_Pin|MIDDLE_PUMP_Pin|DRAIN_PUMP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = FILTER_PUMP_Pin|OXYGEN_RELAY_Pin|CO2_RELAY_Pin|TANK_HEATER_RELAY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -514,7 +542,7 @@ static void MX_GPIO_Init(void)
 
   GPIO_InitStruct.Pin = PRETREAT_HEATER_RELAY_Pin|WATER_INLET_RELAY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 

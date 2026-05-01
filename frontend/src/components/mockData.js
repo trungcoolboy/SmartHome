@@ -324,9 +324,9 @@ export const pageContent = {
       items: [
         { id: "in-pump", key: "in", label: "In Pump", mode: "auto", state: "off" },
         { id: "out-pump", key: "out", label: "Out Pump", mode: "auto", state: "off" },
-        { id: "circulation-pump", key: "circulation", label: "Circulation Pump", mode: "auto", state: "on" },
+        { id: "circulation-pump", key: "circulation", label: "Circulation Pump", mode: "auto", state: "off" },
         { id: "middle-pump", key: "middle", label: "Middle Pump", mode: "auto", state: "off" },
-        { id: "filter-pump", key: "filter", label: "Filter Pump", mode: "auto", state: "on" },
+        { id: "filter-pump", key: "filter", label: "Filter Pump", mode: "auto", state: "off" },
         { id: "drain-pump", key: "drain", label: "Drain Pump", mode: "auto", state: "off" },
       ],
     },

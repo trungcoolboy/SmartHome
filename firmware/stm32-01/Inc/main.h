@@ -61,8 +61,10 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LED2_Pin GPIO_PIN_5
 #define LED2_GPIO_Port GPIOA
-#define IN_PUMP_Pin GPIO_PIN_0
-#define IN_PUMP_GPIO_Port GPIOB
+#define IN_PUMP_Pin GPIO_PIN_8
+#define IN_PUMP_GPIO_Port GPIOA
+#define LEGACY_IN_PUMP_OFF_Pin GPIO_PIN_0
+#define LEGACY_IN_PUMP_OFF_GPIO_Port GPIOB
 #define OUT_PUMP_Pin GPIO_PIN_1
 #define OUT_PUMP_GPIO_Port GPIOB
 #define CIRCULATION_PUMP_Pin GPIO_PIN_2
