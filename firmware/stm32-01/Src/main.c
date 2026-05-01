@@ -177,6 +177,79 @@ static void emit_sensor_state(const SensorChannel *sensor)
   );
 }
 
+static uint32_t read_adc_channel(uint32_t channel)
+{
+  ADC_ChannelConfTypeDef config = {0};
+  uint32_t total = 0U;
+  uint32_t samples = 0U;
+
+  config.Channel = channel;
+  config.Rank = ADC_REGULAR_RANK_1;
+  config.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  config.SingleDiff = ADC_SINGLE_ENDED;
+  config.OffsetNumber = ADC_OFFSET_NONE;
+  config.Offset = 0U;
+
+  if (HAL_ADC_ConfigChannel(&hadc1, &config) != HAL_OK)
+  {
+    return 0U;
+  }
+
+  for (samples = 0U; samples < 8U; samples++)
+  {
+    if (HAL_ADC_Start(&hadc1) != HAL_OK)
+    {
+      return 0U;
+    }
+    if (HAL_ADC_PollForConversion(&hadc1, 10U) != HAL_OK)
+    {
+      HAL_ADC_Stop(&hadc1);
+      return 0U;
+    }
+    total += HAL_ADC_GetValue(&hadc1);
+    HAL_ADC_Stop(&hadc1);
+  }
+
+  return total / 8U;
+}
+
+static int32_t ntc_raw_to_centi_c(uint32_t raw)
+{
+  const float adc_max = 4095.0f;
+  const float series_resistor = 10000.0f;
+  const float nominal_resistor = 10000.0f;
+  const float nominal_kelvin = 298.15f;
+  const float beta = 3950.0f;
+
+  if (raw == 0U || raw >= 4095U)
+  {
+    return -12700;
+  }
+
+  const float raw_f = (float)raw;
+  const float ntc_resistance = series_resistor * raw_f / (adc_max - raw_f);
+  const float kelvin = 1.0f / ((1.0f / nominal_kelvin) + (logf(ntc_resistance / nominal_resistor) / beta));
+  const float celsius = kelvin - 273.15f;
+
+  return (int32_t)((celsius * 100.0f) + (celsius >= 0.0f ? 0.5f : -0.5f));
+}
+
+static void emit_temperature_state(const TemperatureChannel *sensor)
+{
+  const uint32_t raw = read_adc_channel(sensor->adc_channel);
+  const int32_t centi_c = ntc_raw_to_centi_c(raw);
+  const int32_t whole = centi_c / 100;
+  const int32_t fraction = labs(centi_c % 100);
+
+  printf(
+    "temp %s %ld.%02ld raw %lu\r\n",
+    sensor->key,
+    (long)whole,
+    (long)fraction,
+    (unsigned long)raw
+  );
+}
+
 static void emit_status_snapshot(void)
 {
   size_t i;
@@ -192,13 +265,18 @@ static void emit_status_snapshot(void)
   {
     emit_sensor_state(&water_level_sensors[i]);
   }
+  for (i = 0U; i < sizeof(temperature_sensors) / sizeof(temperature_sensors[0]); i++)
+  {
+    emit_temperature_state(&temperature_sensors[i]);
+  }
 }
 
 static size_t status_snapshot_item_count(void)
 {
   return (sizeof(pump_channels) / sizeof(pump_channels[0])) +
          (sizeof(misc_channels) / sizeof(misc_channels[0])) +
-         (sizeof(water_level_sensors) / sizeof(water_level_sensors[0]));
+         (sizeof(water_level_sensors) / sizeof(water_level_sensors[0])) +
+         (sizeof(temperature_sensors) / sizeof(temperature_sensors[0]));
 }
 
 static void emit_status_snapshot_item(size_t index)
@@ -223,6 +301,13 @@ static void emit_status_snapshot_item(size_t index)
   if (index < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]))
   {
     emit_sensor_state(&water_level_sensors[index]);
+    return;
+  }
+
+  index -= sizeof(water_level_sensors) / sizeof(water_level_sensors[0]);
+  if (index < sizeof(temperature_sensors) / sizeof(temperature_sensors[0]))
+  {
+    emit_temperature_state(&temperature_sensors[index]);
   }
 }
 
@@ -383,6 +468,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_ADC1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
