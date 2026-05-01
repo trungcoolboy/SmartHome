@@ -345,7 +345,6 @@ int main(void)
     static char rx_line[96];
     static size_t rx_len = 0U;
     static uint32_t last_led_toggle_ms = 0U;
-    static uint32_t last_status_emit_ms = 0U;
     const uint32_t now_ms = HAL_GetTick();
 
     if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE))
@@ -388,11 +387,6 @@ int main(void)
     {
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       last_led_toggle_ms = now_ms;
-    }
-    if (now_ms - last_status_emit_ms >= 2000U)
-    {
-      emit_status_snapshot();
-      last_status_emit_ms = now_ms;
     }
     /* USER CODE END WHILE */
 
