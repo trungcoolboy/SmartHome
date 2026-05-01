@@ -356,6 +356,15 @@ export const pageContent = {
         { id: "waste-high", label: "Waste High", wet: false },
       ],
     },
+    temperatureSensors: {
+      title: "Temperature Sensors",
+      items: [
+        { id: "tank-front-temp", key: "tank_front_temp", label: "Tank Front", celsius: null },
+        { id: "tank-end-temp", key: "tank_end_temp", label: "Tank End", celsius: null },
+        { id: "pretreat-temp", key: "pretreat_temp", label: "Pre-treat", celsius: null },
+        { id: "pretreat-block-temp", key: "pretreat_block_temp", label: "Pre-treat Block", celsius: null },
+      ],
+    },
     highlights: [
       {
         id: "control",

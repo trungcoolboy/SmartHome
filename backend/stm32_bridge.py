@@ -34,6 +34,7 @@ class BridgeState:
     error: str | None = None
     controls: dict[str, dict[str, str]] = field(default_factory=dict)
     sensors: dict[str, bool] = field(default_factory=dict)
+    temperatures: dict[str, dict[str, float | int | str]] = field(default_factory=dict)
     log: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=200))
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -53,6 +54,7 @@ class BridgeState:
                 "error": self.error,
                 "controls": dict(self.controls),
                 "sensors": dict(self.sensors),
+                "temperatures": dict(self.temperatures),
                 "uptimeSeconds": round(time.time() - self.boot_time, 3),
             }
 
@@ -95,6 +97,14 @@ class BridgeState:
             if sensor_match:
                 key, wet = sensor_match.groups()
                 self.sensors[key.lower()] = wet.lower() == "wet"
+            temp_match = re.match(r"^temp\s+([a-z0-9_]+)\s+(-?\d+(?:\.\d+)?)\s+raw\s+(\d+)$", line, re.IGNORECASE)
+            if temp_match:
+                key, celsius, raw = temp_match.groups()
+                self.temperatures[key.lower()] = {
+                    "key": key.lower(),
+                    "celsius": float(celsius),
+                    "raw": int(raw),
+                }
             self.log.append(
                 {
                     "ts": self.last_seen,

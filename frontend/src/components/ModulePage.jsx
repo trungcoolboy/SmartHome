@@ -782,6 +782,7 @@ function ModulePage({ page, alertFeed }) {
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
+  const [temperatureStates, setTemperatureStates] = useState({});
   const [pendingAquariumControl, setPendingAquariumControl] = useState("");
   const [uploadItems, setUploadItems] = useState([]);
   const [uploadError, setUploadError] = useState("");
@@ -933,6 +934,14 @@ function ModulePage({ page, alertFeed }) {
 
     return groups;
   }, []);
+  const temperatureReadings = (page.temperatureSensors?.items ?? []).map((item) => {
+    const reading = temperatureStates[item.id] ?? {};
+    return {
+      ...item,
+      celsius: Number.isFinite(reading.celsius) ? reading.celsius : item.celsius,
+      raw: reading.raw,
+    };
+  });
 
   function renderServoGlyph(servoKey) {
     return null;
@@ -1065,6 +1074,16 @@ function ModulePage({ page, alertFeed }) {
         kind: "sensor",
         key: sensorMatch[1].toLowerCase(),
         wet: sensorMatch[2].toLowerCase() === "wet",
+      };
+    }
+
+    const tempMatch = line.match(/^temp\s+([a-z0-9_]+)\s+(-?\d+(?:\.\d+)?)\s+raw\s+(\d+)$/i);
+    if (tempMatch) {
+      return {
+        kind: "temperature",
+        key: tempMatch[1].toLowerCase(),
+        celsius: Number(tempMatch[2]),
+        raw: Number(tempMatch[3]),
       };
     }
 
@@ -1433,10 +1452,14 @@ function ModulePage({ page, alertFeed }) {
     const sensorByKey = Object.fromEntries(
       (page.waterLevelSensors?.items ?? []).map((item) => [item.id.replace(/-/g, "_"), item.id]),
     );
+    const temperatureByKey = Object.fromEntries(
+      (page.temperatureSensors?.items ?? []).map((item) => [item.key ?? item.id.replace(/-/g, "_"), item.id]),
+    );
 
     const nextPumps = {};
     const nextMisc = {};
     const nextSensors = {};
+    const nextTemperatures = {};
     const nextServos = {};
     const nextByj = {};
 
@@ -1472,6 +1495,17 @@ function ModulePage({ page, alertFeed }) {
         return;
       }
 
+      if (parsed.kind === "temperature") {
+        const temperatureId = temperatureByKey[parsed.key];
+        if (temperatureId) {
+          nextTemperatures[temperatureId] = {
+            celsius: parsed.celsius,
+            raw: parsed.raw,
+          };
+        }
+        return;
+      }
+
       const sensorId = sensorByKey[parsed.key];
       if (sensorId) {
         nextSensors[sensorId] = { wet: parsed.wet };
@@ -1486,6 +1520,9 @@ function ModulePage({ page, alertFeed }) {
     }
     if (Object.keys(nextSensors).length) {
       setSensorStates((current) => ({ ...current, ...nextSensors }));
+    }
+    if (Object.keys(nextTemperatures).length) {
+      setTemperatureStates((current) => ({ ...current, ...nextTemperatures }));
     }
     if (Object.keys(nextServos).length) {
       setServoStates((current) => ({ ...current, ...nextServos }));
@@ -1505,10 +1542,14 @@ function ModulePage({ page, alertFeed }) {
     const sensorByKey = Object.fromEntries(
       (page.waterLevelSensors?.items ?? []).map((item) => [item.id.replace(/-/g, "_"), item.id]),
     );
+    const temperatureByKey = Object.fromEntries(
+      (page.temperatureSensors?.items ?? []).map((item) => [item.key ?? item.id.replace(/-/g, "_"), item.id]),
+    );
 
     const nextPumps = {};
     const nextMisc = {};
     const nextSensors = {};
+    const nextTemperatures = {};
 
     Object.values(snapshot.controls ?? {}).forEach((control) => {
       const targetId = control.group === "pump" ? pumpByKey[control.key] : miscByKey[control.key];
@@ -1529,6 +1570,17 @@ function ModulePage({ page, alertFeed }) {
       }
     });
 
+    Object.entries(snapshot.temperatures ?? {}).forEach(([key, reading]) => {
+      const temperatureId = temperatureByKey[key];
+      if (!temperatureId) {
+        return;
+      }
+      nextTemperatures[temperatureId] = {
+        celsius: Number(reading?.celsius),
+        raw: Number(reading?.raw),
+      };
+    });
+
     if (Object.keys(nextPumps).length) {
       setPumpStates((current) => ({ ...current, ...nextPumps }));
     }
@@ -1537,6 +1589,9 @@ function ModulePage({ page, alertFeed }) {
     }
     if (Object.keys(nextSensors).length) {
       setSensorStates((current) => ({ ...current, ...nextSensors }));
+    }
+    if (Object.keys(nextTemperatures).length) {
+      setTemperatureStates((current) => ({ ...current, ...nextTemperatures }));
     }
   }
 
@@ -1617,6 +1672,22 @@ function ModulePage({ page, alertFeed }) {
               wet: false,
           },
         ]),
+        ),
+      );
+    }
+
+    if (!page.temperatureSensors?.items) {
+      setTemperatureStates({});
+    } else {
+      setTemperatureStates(
+        Object.fromEntries(
+          page.temperatureSensors.items.map((item) => [
+            item.id,
+            {
+              celsius: item.celsius ?? null,
+              raw: null,
+            },
+          ]),
         ),
       );
     }
@@ -3970,6 +4041,27 @@ function ModulePage({ page, alertFeed }) {
                             <div className="sensor-chart-name">{group.name}</div>
                           </div>
                         ))}
+                      </div>
+                    </article>
+                  ) : null}
+                  {page.temperatureSensors ? (
+                    <article className="pump-control-card temperature-control-card">
+                      <span className="eyebrow">{page.temperatureSensors.title}</span>
+                      <div className="temperature-grid">
+                        {temperatureReadings.map((item) => {
+                          const hasValue = Number.isFinite(item.celsius);
+                          return (
+                            <div key={item.id} className="temperature-card">
+                              <span className="temperature-label">{item.label}</span>
+                              <span className="temperature-value">
+                                {hasValue ? `${item.celsius.toFixed(1)}°C` : "--"}
+                              </span>
+                              <span className="temperature-raw">
+                                {Number.isFinite(item.raw) ? `ADC ${item.raw}` : "ADC --"}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     </article>
                   ) : null}
