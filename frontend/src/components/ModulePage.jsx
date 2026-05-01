@@ -4044,27 +4044,6 @@ function ModulePage({ page, alertFeed }) {
                       </div>
                     </article>
                   ) : null}
-                  {page.temperatureSensors ? (
-                    <article className="pump-control-card temperature-control-card">
-                      <span className="eyebrow">{page.temperatureSensors.title}</span>
-                      <div className="temperature-grid">
-                        {temperatureReadings.map((item) => {
-                          const hasValue = Number.isFinite(item.celsius);
-                          return (
-                            <div key={item.id} className="temperature-card">
-                              <span className="temperature-label">{item.label}</span>
-                              <span className="temperature-value">
-                                {hasValue ? `${item.celsius.toFixed(1)}°C` : "--"}
-                              </span>
-                              <span className="temperature-raw">
-                                {Number.isFinite(item.raw) ? `ADC ${item.raw}` : "ADC --"}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </article>
-                  ) : null}
                   <article className="pump-control-card">
                     <span className="eyebrow">{page.pumpControl.title}</span>
                     <div className="pump-list">
@@ -4171,6 +4150,27 @@ function ModulePage({ page, alertFeed }) {
                                   </button>
                                 </div>
                               </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  ) : null}
+                  {page.temperatureSensors ? (
+                    <article className="pump-control-card temperature-control-card">
+                      <span className="eyebrow">{page.temperatureSensors.title}</span>
+                      <div className="temperature-grid">
+                        {temperatureReadings.map((item) => {
+                          const hasValue = Number.isFinite(item.celsius);
+                          return (
+                            <div key={item.id} className="temperature-card">
+                              <span className="temperature-label">{item.label}</span>
+                              <span className="temperature-value">
+                                {hasValue ? `${item.celsius.toFixed(1)}°C` : "--"}
+                              </span>
+                              <span className="temperature-raw">
+                                {Number.isFinite(item.raw) ? `ADC ${item.raw}` : "ADC --"}
+                              </span>
                             </div>
                           );
                         })}

@@ -978,6 +978,11 @@ button {
   z-index: 0;
 }
 
+.temperature-control-card {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
 .pump-list {
   display: grid;
   gap: 14px;
@@ -1172,8 +1177,50 @@ button {
   white-space: nowrap;
 }
 
+.temperature-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.temperature-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.temperature-label {
+  font-size: 0.74rem;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.68);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.temperature-value {
+  font-size: 1.55rem;
+  line-height: 1;
+  color: #bbf7d0;
+  font-weight: 900;
+}
+
+.temperature-raw {
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 700;
+}
+
 @media (max-width: 1280px) {
   .sensor-chart-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .temperature-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -2981,7 +3028,8 @@ button {
 
   .pump-control-stack > .pump-control-card:first-child:not(.sensor-control-card),
   .pump-control-stack > .pump-control-card:nth-child(2):not(.sensor-control-card),
-  .sensor-control-card {
+  .sensor-control-card,
+  .temperature-control-card {
     grid-column: auto;
     grid-row: auto;
   }
