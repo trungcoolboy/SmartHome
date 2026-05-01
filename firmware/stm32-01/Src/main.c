@@ -107,8 +107,8 @@ static const SensorChannel water_level_sensors[] = {
 
 static TemperatureChannel temperature_sensors[] = {
   {"pretreat_temp", ADC_CHANNEL_6, -70, 0, 0},
-  {"pretreat_block_temp", ADC_CHANNEL_7, 0, 0, 0},
-  {"tank_front_temp", ADC_CHANNEL_8, 0, 0, 0},
+  {"pretreat_block_temp", ADC_CHANNEL_7, -470, 0, 0},
+  {"tank_front_temp", ADC_CHANNEL_8, -375, 0, 0},
   {"tank_end_temp", ADC_CHANNEL_9, -180, 0, 0},
 };
 /* USER CODE END PV */
