@@ -88,6 +88,9 @@ typedef struct
 {
   const char *key;
   uint32_t adc_channel;
+  int32_t offset_centi_c;
+  int32_t filtered_centi_c;
+  uint8_t filter_ready;
 } TemperatureChannel;
 
 static const SensorChannel water_level_sensors[] = {
@@ -102,11 +105,11 @@ static const SensorChannel water_level_sensors[] = {
   {"waste_high", WASTE_HIGH_SENSOR_GPIO_Port, WASTE_HIGH_SENSOR_Pin},
 };
 
-static const TemperatureChannel temperature_sensors[] = {
-  {"tank_front_temp", ADC_CHANNEL_6},
-  {"tank_end_temp", ADC_CHANNEL_7},
-  {"pretreat_temp", ADC_CHANNEL_8},
-  {"pretreat_block_temp", ADC_CHANNEL_9},
+static TemperatureChannel temperature_sensors[] = {
+  {"pretreat_temp", ADC_CHANNEL_6, -70, 0, 0},
+  {"pretreat_block_temp", ADC_CHANNEL_7, 0, 0, 0},
+  {"tank_front_temp", ADC_CHANNEL_8, 0, 0, 0},
+  {"tank_end_temp", ADC_CHANNEL_9, -180, 0, 0},
 };
 /* USER CODE END PV */
 
@@ -133,7 +136,8 @@ static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
 static uint32_t read_adc_channel(uint32_t channel);
 static int32_t ntc_raw_to_centi_c(uint32_t raw);
-static void emit_temperature_state(const TemperatureChannel *sensor);
+static int32_t filter_temperature_centi_c(TemperatureChannel *sensor, int32_t centi_c);
+static void emit_temperature_state(TemperatureChannel *sensor);
 static void emit_adc_debug(void);
 static void emit_status_snapshot(void);
 static size_t status_snapshot_item_count(void);
@@ -180,13 +184,16 @@ static void emit_sensor_state(const SensorChannel *sensor)
 
 static uint32_t read_adc_channel(uint32_t channel)
 {
+  const uint32_t sample_count = 32U;
   ADC_ChannelConfTypeDef config = {0};
   uint32_t total = 0U;
   uint32_t samples = 0U;
+  uint32_t min_raw = 4095U;
+  uint32_t max_raw = 0U;
 
   config.Channel = channel;
   config.Rank = ADC_REGULAR_RANK_1;
-  config.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  config.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
   config.SingleDiff = ADC_SINGLE_ENDED;
   config.OffsetNumber = ADC_OFFSET_NONE;
   config.Offset = 0U;
@@ -196,8 +203,9 @@ static uint32_t read_adc_channel(uint32_t channel)
     return 0U;
   }
 
-  for (samples = 0U; samples < 8U; samples++)
+  for (samples = 0U; samples < sample_count; samples++)
   {
+    uint32_t raw;
     if (HAL_ADC_Start(&hadc1) != HAL_OK)
     {
       return 0U;
@@ -207,11 +215,20 @@ static uint32_t read_adc_channel(uint32_t channel)
       HAL_ADC_Stop(&hadc1);
       return 0U;
     }
-    total += HAL_ADC_GetValue(&hadc1);
+    raw = HAL_ADC_GetValue(&hadc1);
+    total += raw;
+    if (raw < min_raw)
+    {
+      min_raw = raw;
+    }
+    if (raw > max_raw)
+    {
+      max_raw = raw;
+    }
     HAL_ADC_Stop(&hadc1);
   }
 
-  return total / 8U;
+  return (total - min_raw - max_raw) / (sample_count - 2U);
 }
 
 static int32_t ntc_raw_to_centi_c(uint32_t raw)
@@ -235,16 +252,41 @@ static int32_t ntc_raw_to_centi_c(uint32_t raw)
   return (int32_t)((celsius * 100.0f) + (celsius >= 0.0f ? 0.5f : -0.5f));
 }
 
-static void emit_temperature_state(const TemperatureChannel *sensor)
+static int32_t filter_temperature_centi_c(TemperatureChannel *sensor, int32_t centi_c)
+{
+  if (centi_c <= -12700)
+  {
+    sensor->filter_ready = 0U;
+    return centi_c;
+  }
+
+  centi_c += sensor->offset_centi_c;
+
+  if (sensor->filter_ready == 0U)
+  {
+    sensor->filtered_centi_c = centi_c;
+    sensor->filter_ready = 1U;
+  }
+  else
+  {
+    sensor->filtered_centi_c += (centi_c - sensor->filtered_centi_c) / 8;
+  }
+
+  return sensor->filtered_centi_c;
+}
+
+static void emit_temperature_state(TemperatureChannel *sensor)
 {
   const uint32_t raw = read_adc_channel(sensor->adc_channel);
-  const int32_t centi_c = ntc_raw_to_centi_c(raw);
-  const int32_t whole = centi_c / 100;
-  const int32_t fraction = labs(centi_c % 100);
+  const int32_t centi_c = filter_temperature_centi_c(sensor, ntc_raw_to_centi_c(raw));
+  const int32_t abs_centi_c = labs(centi_c);
+  const int32_t whole = abs_centi_c / 100;
+  const int32_t fraction = abs_centi_c % 100;
 
   printf(
-    "temp %s %ld.%02ld raw %lu\r\n",
+    "temp %s %s%ld.%02ld raw %lu\r\n",
     sensor->key,
+    (centi_c < 0) ? "-" : "",
     (long)whole,
     (long)fraction,
     (unsigned long)raw
