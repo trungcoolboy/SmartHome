@@ -254,6 +254,10 @@ static void emit_temperature_state(const TemperatureChannel *sensor)
 static void emit_adc_debug(void)
 {
   printf(
+    "adcdebug vrefint raw %lu\r\n",
+    (unsigned long)read_adc_channel(ADC_CHANNEL_VREFINT)
+  );
+  printf(
     "adcdebug pc0 ch6 raw %lu\r\n",
     (unsigned long)read_adc_channel(ADC_CHANNEL_6)
   );
@@ -674,6 +678,16 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_ADC1_Init(void)
 {
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+  ADC_MultiModeTypeDef multimode = {0};
+
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC12;
+  PeriphClkInit.Adc12ClockSelection = RCC_ADC12CLKSOURCE_SYSCLK;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   __HAL_RCC_ADC12_CLK_ENABLE();
 
   hadc1.Instance = ADC1;
@@ -699,6 +713,13 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
+
+  multimode.Mode = ADC_MODE_INDEPENDENT;
+  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
   {
     Error_Handler();
