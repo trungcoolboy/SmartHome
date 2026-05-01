@@ -89,7 +89,7 @@ typedef struct
   const char *key;
   uint32_t adc_channel;
   int32_t offset_centi_c;
-  int32_t filtered_centi_c;
+  uint32_t filtered_raw;
   uint8_t filter_ready;
 } TemperatureChannel;
 
@@ -135,6 +135,7 @@ static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
 static uint32_t read_adc_channel(uint32_t channel);
+static uint32_t filter_temperature_raw(TemperatureChannel *sensor, uint32_t raw);
 static int32_t ntc_raw_to_centi_c(uint32_t raw);
 static int32_t filter_temperature_centi_c(TemperatureChannel *sensor, int32_t centi_c);
 static void emit_temperature_state(TemperatureChannel *sensor);
@@ -253,24 +254,46 @@ static int32_t ntc_raw_to_centi_c(uint32_t raw)
   return (int32_t)((celsius * 100.0f) + (celsius >= 0.0f ? 0.5f : -0.5f));
 }
 
+static uint32_t filter_temperature_raw(TemperatureChannel *sensor, uint32_t raw)
+{
+  const uint32_t reset_threshold = 120U;
+  const uint32_t diff = (raw > sensor->filtered_raw)
+    ? (raw - sensor->filtered_raw)
+    : (sensor->filtered_raw - raw);
+
+  if (sensor->filter_ready == 0U || diff > reset_threshold)
+  {
+    sensor->filtered_raw = raw;
+    sensor->filter_ready = 1U;
+    return raw;
+  }
+
+  if (diff > 0U)
+  {
+    const uint32_t step = (diff + 3U) / 4U;
+    sensor->filtered_raw = (raw > sensor->filtered_raw)
+      ? (sensor->filtered_raw + step)
+      : (sensor->filtered_raw - step);
+  }
+
+  return sensor->filtered_raw;
+}
+
 static int32_t filter_temperature_centi_c(TemperatureChannel *sensor, int32_t centi_c)
 {
   if (centi_c <= -12700)
   {
-    sensor->filter_ready = 0U;
     return centi_c;
   }
 
   centi_c += sensor->offset_centi_c;
-  sensor->filtered_centi_c = centi_c;
-  sensor->filter_ready = 1U;
 
   return centi_c;
 }
 
 static void emit_temperature_state(TemperatureChannel *sensor)
 {
-  const uint32_t raw = read_adc_channel(sensor->adc_channel);
+  const uint32_t raw = filter_temperature_raw(sensor, read_adc_channel(sensor->adc_channel));
   const int32_t centi_c = filter_temperature_centi_c(sensor, ntc_raw_to_centi_c(raw));
   const int32_t abs_centi_c = labs(centi_c);
   const int32_t whole = abs_centi_c / 100;
