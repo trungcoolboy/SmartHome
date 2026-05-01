@@ -134,6 +134,7 @@ static void uart_write_line(const char *text);
 static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
+static uint8_t read_water_sensor_wet(const char *key);
 static uint32_t read_adc_channel(uint32_t channel);
 static uint32_t filter_temperature_raw(TemperatureChannel *sensor, uint32_t raw);
 static int32_t ntc_raw_to_centi_c(uint32_t raw);
@@ -144,6 +145,7 @@ static void emit_status_snapshot(void);
 static size_t status_snapshot_item_count(void);
 static void emit_status_snapshot_item(size_t index);
 static ControlChannel *find_channel(const char *group, const char *key);
+static void update_auto_water_inlet(void);
 static void process_command_line(char *line);
 /* USER CODE END PFP */
 
@@ -181,6 +183,21 @@ static void emit_sensor_state(const SensorChannel *sensor)
     sensor->key,
     (pin_state == GPIO_PIN_RESET) ? "wet" : "dry"
   );
+}
+
+static uint8_t read_water_sensor_wet(const char *key)
+{
+  size_t i;
+  for (i = 0U; i < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]); i++)
+  {
+    const SensorChannel *sensor = &water_level_sensors[i];
+    if (strcmp(sensor->key, key) == 0)
+    {
+      return (HAL_GPIO_ReadPin(sensor->port, sensor->pin) == GPIO_PIN_RESET) ? 1U : 0U;
+    }
+  }
+
+  return 0U;
 }
 
 static uint32_t read_adc_channel(uint32_t channel)
@@ -426,6 +443,31 @@ static ControlChannel *find_channel(const char *group, const char *key)
   return NULL;
 }
 
+static void update_auto_water_inlet(void)
+{
+  ControlChannel *inlet = find_channel("misc", "inlet");
+  uint8_t next_output_on;
+  const uint8_t inlet_high_wet = read_water_sensor_wet("inlet_high");
+
+  if (inlet == NULL || inlet->auto_mode == 0U)
+  {
+    return;
+  }
+
+  next_output_on = 1U;
+  if (inlet_high_wet != 0U)
+  {
+    next_output_on = 0U;
+  }
+
+  if (next_output_on != inlet->output_on)
+  {
+    inlet->output_on = next_output_on;
+    apply_relay_output(inlet);
+    emit_control_state(inlet);
+  }
+}
+
 static void process_command_line(char *line)
 {
   char *tokens[5] = {0};
@@ -573,6 +615,7 @@ int main(void)
     static char rx_line[96];
     static size_t rx_len = 0U;
     static uint32_t last_led_toggle_ms = 0U;
+    static uint32_t last_auto_update_ms = 0U;
     static uint32_t last_status_emit_ms = 0U;
     static uint32_t last_status_line_emit_ms = 0U;
     static size_t status_emit_index = 0U;
@@ -619,6 +662,11 @@ int main(void)
     {
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       last_led_toggle_ms = now_ms;
+    }
+    if (now_ms - last_auto_update_ms >= 100U)
+    {
+      update_auto_water_inlet();
+      last_auto_update_ms = now_ms;
     }
     if (now_ms - last_status_emit_ms >= 1000U)
     {
