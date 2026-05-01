@@ -134,6 +134,7 @@ static void emit_sensor_state(const SensorChannel *sensor);
 static uint32_t read_adc_channel(uint32_t channel);
 static int32_t ntc_raw_to_centi_c(uint32_t raw);
 static void emit_temperature_state(const TemperatureChannel *sensor);
+static void emit_adc_debug(void);
 static void emit_status_snapshot(void);
 static size_t status_snapshot_item_count(void);
 static void emit_status_snapshot_item(size_t index);
@@ -250,6 +251,26 @@ static void emit_temperature_state(const TemperatureChannel *sensor)
   );
 }
 
+static void emit_adc_debug(void)
+{
+  printf(
+    "adcdebug pc0 ch6 raw %lu\r\n",
+    (unsigned long)read_adc_channel(ADC_CHANNEL_6)
+  );
+  printf(
+    "adcdebug pc1 ch7 raw %lu\r\n",
+    (unsigned long)read_adc_channel(ADC_CHANNEL_7)
+  );
+  printf(
+    "adcdebug pc2 ch8 raw %lu\r\n",
+    (unsigned long)read_adc_channel(ADC_CHANNEL_8)
+  );
+  printf(
+    "adcdebug pc3 ch9 raw %lu\r\n",
+    (unsigned long)read_adc_channel(ADC_CHANNEL_9)
+  );
+}
+
 static void emit_status_snapshot(void)
 {
   size_t i;
@@ -363,6 +384,12 @@ static void process_command_line(char *line)
   if (strcmp(tokens[0], "status") == 0)
   {
     emit_status_snapshot();
+    return;
+  }
+
+  if (strcmp(tokens[0], "adcdebug") == 0)
+  {
+    emit_adc_debug();
     return;
   }
 
