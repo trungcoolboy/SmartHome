@@ -381,6 +381,12 @@ void b_axis_motion_home(void)
   b_motion_halt();
   b_axis_mark_stopped();
   b_axis.homed = 0U;
+  if (b_min_endstop_triggered() && b_max_endstop_triggered())
+  {
+    b_axis_motion_abort_sequence();
+    printf("err axis b endstops both_triggered\r\n");
+    return;
+  }
   b_axis.moving = 1U;
   b_axis.velocity = B_HOME_SEEK_DIRECTION;
   b_axis.target = (B_HOME_SEEK_DIRECTION > 0) ? INT32_MAX : INT32_MIN;
@@ -408,6 +414,12 @@ void b_axis_motion_scan(void)
   b_motion_halt();
   b_axis_mark_stopped();
   b_axis.homed = 0U;
+  if (b_min_endstop_triggered() && b_max_endstop_triggered())
+  {
+    b_axis_motion_abort_sequence();
+    printf("err axis b endstops both_triggered\r\n");
+    return;
+  }
   b_axis.moving = 1U;
   b_axis.velocity = B_HOME_SEEK_DIRECTION;
   b_axis.target = (B_HOME_SEEK_DIRECTION > 0) ? INT32_MAX : INT32_MIN;
