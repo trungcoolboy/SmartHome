@@ -1119,8 +1119,10 @@ button {
 
 .sensor-chart-segment {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 3px;
   min-height: 44px;
   padding: 8px 6px;
   border-radius: 12px;
@@ -1141,9 +1143,21 @@ button {
   text-align: center;
 }
 
+.sensor-chart-state {
+  font-size: 0.68rem;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.58);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .sensor-chart-segment.wet {
   border-color: rgba(119, 224, 207, 0.2);
   background: rgba(119, 224, 207, 0.1);
+}
+
+.sensor-chart-segment.wet .sensor-chart-state {
+  color: #77e0cf;
 }
 
 .sensor-chart-segment.dry {

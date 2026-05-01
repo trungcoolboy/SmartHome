@@ -3725,14 +3725,15 @@ function ModulePage({ page, alertFeed }) {
       if (onSuccess) {
         onSuccess();
       }
+      if (payload.state) {
+        applyBridgeSnapshotToControls(payload.state);
+      }
       setBridgeError("");
-      requestPumpStatus(1000);
+      requestPumpStatus(200);
     } catch (error) {
       setBridgeError(`${item.label}: ${error.message}`);
     } finally {
-      window.setTimeout(() => {
-        setPendingAquariumControl((current) => (current === commandText ? "" : current));
-      }, 1000);
+      setPendingAquariumControl((current) => (current === commandText ? "" : current));
     }
   }
 
@@ -3753,7 +3754,9 @@ function ModulePage({ page, alertFeed }) {
       return;
     }
 
-    sendPumpCommand(item, `pump ${item.key} ${state}`);
+    sendPumpCommand(item, `pump ${item.key} ${state}`, () => {
+      setPumpPower(item.id, state);
+    });
   }
 
   function setMiscMode(itemId, mode) {
@@ -3803,7 +3806,9 @@ function ModulePage({ page, alertFeed }) {
       return;
     }
 
-    sendPumpCommand(item, `misc ${item.key} ${state}`);
+    sendPumpCommand(item, `misc ${item.key} ${state}`, () => {
+      setMiscPower(item.id, state);
+    });
   }
 
   useEffect(() => {
@@ -3957,6 +3962,7 @@ function ModulePage({ page, alertFeed }) {
                                     className={`sensor-chart-segment ${(level.wet ?? false) ? "wet" : "dry"}`}
                                   >
                                     <span className="sensor-chart-level">{level.label}</span>
+                                    <span className="sensor-chart-state">{(level.wet ?? false) ? "Wet" : "Dry"}</span>
                                   </div>
                                 );
                               })}

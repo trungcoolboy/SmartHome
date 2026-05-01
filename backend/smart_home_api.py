@@ -884,15 +884,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {"ok": True, "sent": text, "deferred": True, "state": runtime.state.snapshot()})
                 return
             with runtime.command_guard_lock:
-                now = time.monotonic()
-                last_at = runtime.last_control_command_at.get(control_id, 0.0)
-                if now - last_at < 2.5:
-                    self._json(
-                        HTTPStatus.OK,
-                        {"ok": True, "sent": text, "deferred": True, "reason": "cooldown", "state": runtime.state.snapshot()},
-                    )
-                    return
-                runtime.last_control_command_at[control_id] = now
+                runtime.last_control_command_at[control_id] = time.monotonic()
         try:
             runtime.bridge.send_text(text)
         except Exception as exc:
@@ -908,7 +900,7 @@ class Handler(BaseHTTPRequestHandler):
                 state=runtime.state.snapshot(),
             )
         runtime.sse_hub.publish({"type": "tx", "payload": text, "ts": time.time()})
-        self._json(HTTPStatus.OK, {"ok": True, "sent": text})
+        self._json(HTTPStatus.OK, {"ok": True, "sent": text, "state": runtime.state.snapshot()})
 
     def _stm32_sse(self, runtime: Stm32Runtime) -> None:
         client = runtime.sse_hub.subscribe()
