@@ -106,10 +106,10 @@ static const SensorChannel water_level_sensors[] = {
 };
 
 static TemperatureChannel temperature_sensors[] = {
-  {"pretreat_temp", ADC_CHANNEL_6, -65, 0, 0},
-  {"pretreat_block_temp", ADC_CHANNEL_7, -470, 0, 0},
-  {"tank_front_temp", ADC_CHANNEL_8, -375, 0, 0},
-  {"tank_end_temp", ADC_CHANNEL_9, -215, 0, 0},
+  {"pretreat_temp", ADC_CHANNEL_6, 0, 0, 0},
+  {"pretreat_block_temp", ADC_CHANNEL_7, 0, 0, 0},
+  {"tank_front_temp", ADC_CHANNEL_8, 0, 0, 0},
+  {"tank_end_temp", ADC_CHANNEL_9, 0, 0, 0},
 };
 /* USER CODE END PV */
 
@@ -233,23 +233,61 @@ static uint32_t read_adc_channel(uint32_t channel)
 
 static int32_t ntc_raw_to_centi_c(uint32_t raw)
 {
-  const float adc_max = 4095.0f;
-  const float series_resistor = 10000.0f;
-  const float nominal_resistor = 10000.0f;
-  const float nominal_kelvin = 298.15f;
-  const float beta = 3950.0f;
+  static const uint16_t raw_by_celsius[] = {
+    3675, 3654, 3632, 3610, 3586, 3563, 3538, 3513, 3487, 3460, 3433, 3404,
+    3375, 3345, 3315, 3283, 3251, 3218, 3184, 3150, 3115, 3078, 3040, 3002,
+    2963, 2923, 2882, 2842, 2800, 2758, 2715, 2672, 2629, 2585, 2541, 2497,
+    2452, 2407, 2362, 2318, 2273, 2227, 2182, 2137, 2093, 2048, 2003, 1959,
+    1915, 1871, 1828, 1785, 1743, 1701, 1660, 1619, 1579, 1539, 1500, 1461,
+    1423, 1386, 1349, 1314, 1278, 1244, 1210, 1177, 1145, 1113, 1082, 1052,
+    1023, 994, 966, 938, 911, 886, 860, 836, 812, 788, 765, 743,
+    722, 701, 681, 661, 642, 623, 605, 588, 571, 555, 539, 523,
+    508, 494, 479, 466, 453, 440, 427, 415, 403, 392, 381, 371,
+    361, 351, 341, 332, 323, 314, 305, 297, 289, 281, 273, 266,
+    259, 252, 245, 239, 233, 227, 221, 215, 209, 203, 198, 193,
+    188, 183, 178, 173, 168, 164, 160, 155, 151, 147, 143, 140,
+    136, 132,
+  };
+  const int32_t min_centi_c = -2000;
+  const int32_t max_centi_c = 12500;
+  const size_t table_count = sizeof(raw_by_celsius) / sizeof(raw_by_celsius[0]);
 
   if (raw == 0U || raw >= 4095U)
   {
     return -12700;
   }
 
-  const float raw_f = (float)raw;
-  const float ntc_resistance = series_resistor * raw_f / (adc_max - raw_f);
-  const float kelvin = 1.0f / ((1.0f / nominal_kelvin) + (logf(ntc_resistance / nominal_resistor) / beta));
-  const float celsius = kelvin - 273.15f;
+  if (raw >= raw_by_celsius[0])
+  {
+    return min_centi_c;
+  }
 
-  return (int32_t)((celsius * 100.0f) + (celsius >= 0.0f ? 0.5f : -0.5f));
+  if (raw <= raw_by_celsius[table_count - 1U])
+  {
+    return max_centi_c;
+  }
+
+  for (size_t index = 0; index < table_count - 1U; ++index)
+  {
+    const uint32_t raw_low_temp = raw_by_celsius[index];
+    const uint32_t raw_high_temp = raw_by_celsius[index + 1U];
+
+    if (raw <= raw_low_temp && raw >= raw_high_temp)
+    {
+      const int32_t lower_temp_centi = min_centi_c + ((int32_t)index * 100);
+      const uint32_t raw_span = raw_low_temp - raw_high_temp;
+      const uint32_t raw_delta = raw_low_temp - raw;
+
+      if (raw_span == 0U)
+      {
+        return lower_temp_centi;
+      }
+
+      return lower_temp_centi + (int32_t)((raw_delta * 100U) / raw_span);
+    }
+  }
+
+  return -12700;
 }
 
 static int32_t filter_temperature_centi_c(TemperatureChannel *sensor, int32_t centi_c)
