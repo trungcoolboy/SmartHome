@@ -116,7 +116,8 @@ static void apply_relay_output(const ControlChannel *channel);
 static void emit_control_state(const ControlChannel *channel);
 static void emit_sensor_state(const SensorChannel *sensor);
 static void emit_status_snapshot(void);
-static void emit_sensor_snapshot(void);
+static size_t status_snapshot_item_count(void);
+static void emit_status_snapshot_item(size_t index);
 static ControlChannel *find_channel(const char *group, const char *key);
 static void process_command_line(char *line);
 /* USER CODE END PFP */
@@ -174,12 +175,35 @@ static void emit_status_snapshot(void)
   }
 }
 
-static void emit_sensor_snapshot(void)
+static size_t status_snapshot_item_count(void)
 {
-  size_t i;
-  for (i = 0U; i < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]); i++)
+  return (sizeof(pump_channels) / sizeof(pump_channels[0])) +
+         (sizeof(misc_channels) / sizeof(misc_channels[0])) +
+         (sizeof(water_level_sensors) / sizeof(water_level_sensors[0]));
+}
+
+static void emit_status_snapshot_item(size_t index)
+{
+  const size_t pump_count = sizeof(pump_channels) / sizeof(pump_channels[0]);
+  const size_t misc_count = sizeof(misc_channels) / sizeof(misc_channels[0]);
+
+  if (index < pump_count)
   {
-    emit_sensor_state(&water_level_sensors[i]);
+    emit_control_state(&pump_channels[index]);
+    return;
+  }
+
+  index -= pump_count;
+  if (index < misc_count)
+  {
+    emit_control_state(&misc_channels[index]);
+    return;
+  }
+
+  index -= misc_count;
+  if (index < sizeof(water_level_sensors) / sizeof(water_level_sensors[0]))
+  {
+    emit_sensor_state(&water_level_sensors[index]);
   }
 }
 
@@ -355,7 +379,10 @@ int main(void)
     static char rx_line[96];
     static size_t rx_len = 0U;
     static uint32_t last_led_toggle_ms = 0U;
-    static uint32_t last_sensor_emit_ms = 0U;
+    static uint32_t last_status_emit_ms = 0U;
+    static uint32_t last_status_line_emit_ms = 0U;
+    static size_t status_emit_index = 0U;
+    static uint8_t status_emit_active = 0U;
     const uint32_t now_ms = HAL_GetTick();
 
     if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE))
@@ -399,10 +426,24 @@ int main(void)
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       last_led_toggle_ms = now_ms;
     }
-    if (now_ms - last_sensor_emit_ms >= 2000U)
+    if (now_ms - last_status_emit_ms >= 2000U)
     {
-      emit_sensor_snapshot();
-      last_sensor_emit_ms = now_ms;
+      status_emit_active = 1U;
+      status_emit_index = 0U;
+      last_status_emit_ms = now_ms;
+    }
+    if (status_emit_active != 0U && now_ms - last_status_line_emit_ms >= 10U)
+    {
+      if (status_emit_index < status_snapshot_item_count())
+      {
+        emit_status_snapshot_item(status_emit_index);
+        status_emit_index++;
+        last_status_line_emit_ms = now_ms;
+      }
+      else
+      {
+        status_emit_active = 0U;
+      }
     }
     /* USER CODE END WHILE */
 
