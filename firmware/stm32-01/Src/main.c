@@ -445,24 +445,36 @@ static ControlChannel *find_channel(const char *group, const char *key)
 
 static void update_auto_water_inlet(void)
 {
+  static uint8_t fill_latched = 0U;
+  static uint8_t latch_ready = 0U;
   ControlChannel *inlet = find_channel("misc", "inlet");
-  uint8_t next_output_on;
+  const uint8_t inlet_low_wet = read_water_sensor_wet("inlet_low");
   const uint8_t inlet_high_wet = read_water_sensor_wet("inlet_high");
 
   if (inlet == NULL || inlet->auto_mode == 0U)
   {
+    latch_ready = 0U;
     return;
   }
 
-  next_output_on = 1U;
-  if (inlet_high_wet != 0U)
+  if (latch_ready == 0U)
   {
-    next_output_on = 0U;
+    fill_latched = (inlet_high_wet == 0U) ? 1U : 0U;
+    latch_ready = 1U;
   }
 
-  if (next_output_on != inlet->output_on)
+  if (inlet_high_wet != 0U)
   {
-    inlet->output_on = next_output_on;
+    fill_latched = 0U;
+  }
+  else if (inlet_low_wet == 0U)
+  {
+    fill_latched = 1U;
+  }
+
+  if (fill_latched != inlet->output_on)
+  {
+    inlet->output_on = fill_latched;
     apply_relay_output(inlet);
     emit_control_state(inlet);
   }
