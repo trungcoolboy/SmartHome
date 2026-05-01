@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{font-family:Arial,sans-serif;font-size:13px;fill:#1f2937}.small{font-size:11px;fill:#4b5563}.axis{stroke:#111827;stroke-width:1.4}.grid{stroke:#e5e7eb;stroke-width:1}.curve{fill:none;stroke:#2563eb;stroke-width:3}.dot{fill:#dc2626}</style>
+<text x="450.0" y="22" text-anchor="middle" font-size="18" font-weight="700">NTC 10K 3950 datasheet calibration curve</text>
+<text x="450.0" y="42" text-anchor="middle" class="small">HandsOnTec R-T table converted to STM32 12-bit ADC raw, assuming 10k series resistor</text>
+<line class="grid" x1="70.0" y1="35" x2="70.0" y2="460"/>
+<text x="70.0" y="482" text-anchor="middle">-20</text>
+<line class="grid" x1="181.0" y1="35" x2="181.0" y2="460"/>
+<text x="181.0" y="482" text-anchor="middle">0</text>
+<line class="grid" x1="292.1" y1="35" x2="292.1" y2="460"/>
+<text x="292.1" y="482" text-anchor="middle">20</text>
+<line class="grid" x1="403.1" y1="35" x2="403.1" y2="460"/>
+<text x="403.1" y="482" text-anchor="middle">40</text>
+<line class="grid" x1="514.1" y1="35" x2="514.1" y2="460"/>
+<text x="514.1" y="482" text-anchor="middle">60</text>
+<line class="grid" x1="625.2" y1="35" x2="625.2" y2="460"/>
+<text x="625.2" y="482" text-anchor="middle">80</text>
+<line class="grid" x1="736.2" y1="35" x2="736.2" y2="460"/>
+<text x="736.2" y="482" text-anchor="middle">100</text>
+<line class="grid" x1="847.2" y1="35" x2="847.2" y2="460"/>
+<text x="847.2" y="482" text-anchor="middle">120</text>
+<line class="grid" x1="70" y1="460.0" x2="875" y2="460.0"/>
+<text x="60" y="464.0" text-anchor="end">0</text>
+<line class="grid" x1="70" y1="406.9" x2="875" y2="406.9"/>
+<text x="60" y="410.9" text-anchor="end">512</text>
+<line class="grid" x1="70" y1="353.7" x2="875" y2="353.7"/>
+<text x="60" y="357.7" text-anchor="end">1024</text>
+<line class="grid" x1="70" y1="300.6" x2="875" y2="300.6"/>
+<text x="60" y="304.6" text-anchor="end">1536</text>
+<line class="grid" x1="70" y1="247.4" x2="875" y2="247.4"/>
+<text x="60" y="251.4" text-anchor="end">2048</text>
+<line class="grid" x1="70" y1="194.3" x2="875" y2="194.3"/>
+<text x="60" y="198.3" text-anchor="end">2560</text>
+<line class="grid" x1="70" y1="141.2" x2="875" y2="141.2"/>
+<text x="60" y="145.2" text-anchor="end">3072</text>
+<line class="grid" x1="70" y1="88.0" x2="875" y2="88.0"/>
+<text x="60" y="92.0" text-anchor="end">3584</text>
+<line class="axis" x1="70" y1="460" x2="875" y2="460"/>
+<line class="axis" x1="70" y1="35" x2="70" y2="460"/>
+<polyline class="curve" points="70.0,78.6 75.6,80.8 81.1,83.1 86.7,85.4 92.2,87.8 97.8,90.3 103.3,92.8 108.9,95.4 114.4,98.1 120.0,100.9 125.5,103.7 131.1,106.7 136.6,109.7 142.2,112.8 147.7,116.0 153.3,119.2 158.8,122.6 164.4,126.0 169.9,129.5 175.5,133.1 181.0,136.7 186.6,140.6 192.1,144.5 197.7,148.5 203.2,152.5 208.8,156.6 214.3,160.9 219.9,165.1 225.4,169.4 231.0,173.8 236.6,178.2 242.1,182.7 247.7,187.2 253.2,191.7 258.8,196.3 264.3,200.9 269.9,205.5 275.4,210.2 281.0,214.9 286.5,219.5 292.1,224.1 297.6,228.9 303.2,233.5 308.7,238.3 314.3,242.8 319.8,247.5 325.4,252.1 330.9,256.7 336.5,261.3 342.0,265.8 347.6,270.3 353.1,274.7 358.7,279.1 364.2,283.5 369.8,287.8 375.3,292.0 380.9,296.2 386.4,300.3 392.0,304.4 397.6,308.3 403.1,312.3 408.7,316.1 414.2,319.9 419.8,323.7 425.3,327.3 430.9,330.9 436.4,334.4 442.0,337.8 447.5,341.2 453.1,344.5 458.6,347.7 464.2,350.8 469.7,353.9 475.3,356.9 480.8,359.8 486.4,362.6 491.9,365.4 497.5,368.1 503.0,370.7 508.6,373.3 514.1,375.8 519.7,378.2 525.2,380.6 530.8,382.8 536.3,385.1 541.9,387.2 547.4,389.3 553.0,391.4 558.6,393.3 564.1,395.3 569.7,397.2 575.2,399.0 580.8,400.7 586.3,402.4 591.9,404.1 597.4,405.7 603.0,407.3 608.5,408.8 614.1,410.2 619.6,411.6 625.2,413.0 630.7,414.4 636.3,415.7 641.8,416.9 647.4,418.1 652.9,419.3 658.5,420.4 664.0,421.5 669.6,422.6 675.1,423.6 680.7,424.6 686.2,425.6 691.8,426.5 697.3,427.4 702.9,428.3 708.4,429.2 714.0,430.0 719.6,430.8 725.1,431.6 730.7,432.4 736.2,433.1 741.8,433.8 747.3,434.5 752.9,435.2 758.4,435.8 764.0,436.5 769.5,437.1 775.1,437.7 780.6,438.3 786.2,438.9 791.7,439.4 797.3,440.0 802.8,440.5 808.4,441.0 813.9,441.5 819.5,442.0 825.0,442.5 830.6,443.0 836.1,443.4 841.7,443.9 847.2,444.3 852.8,444.7 858.3,445.1 863.9,445.5 869.4,445.9 875.0,446.3"/>
+<circle class="dot" cx="70.0" cy="78.6" r="3.5"/>
+<text class="small" x="75.0" y="72.6">-20C / 3675</text>
+<circle class="dot" cx="125.5" cy="103.7" r="3.5"/>
+<text class="small" x="130.5" y="97.7">-10C / 3433</text>
+<circle class="dot" cx="181.0" cy="136.7" r="3.5"/>
+<text class="small" x="186.0" y="130.7">0C / 3115</text>
+<circle class="dot" cx="186.6" cy="140.6" r="3.5"/>
+<text class="small" x="191.6" y="134.6">1C / 3078</text>
+<circle class="dot" cx="192.1" cy="144.5" r="3.5"/>
+<text class="small" x="197.1" y="138.5">2C / 3040</text>
+<circle class="dot" cx="208.8" cy="156.6" r="3.5"/>
+<text class="small" x="213.8" y="150.6">5C / 2923</text>
+<circle class="dot" cx="236.6" cy="178.2" r="3.5"/>
+<text class="small" x="241.6" y="172.2">10C / 2715</text>
+<circle class="dot" cx="319.8" cy="247.5" r="3.5"/>
+<text class="small" x="324.8" y="241.5">25C / 2048</text>
+<circle class="dot" cx="403.1" cy="312.3" r="3.5"/>
+<text class="small" x="408.1" y="306.3">40C / 1423</text>
+<circle class="dot" cx="514.1" cy="375.8" r="3.5"/>
+<text class="small" x="519.1" y="369.8">60C / 812</text>
+<circle class="dot" cx="625.2" cy="413.0" r="3.5"/>
+<text class="small" x="630.2" y="407.0">80C / 453</text>
+<circle class="dot" cx="736.2" cy="433.1" r="3.5"/>
+<text class="small" x="741.2" y="427.1">100C / 259</text>
+<circle class="dot" cx="875.0" cy="446.3" r="3.5"/>
+<text class="small" x="880.0" y="440.3">125C / 132</text>
+<text x="450.0" y="504" text-anchor="middle">Temperature (C)</text>
+<text transform="translate(18 260.0) rotate(-90)" text-anchor="middle">ADC raw</text>
+</svg>
