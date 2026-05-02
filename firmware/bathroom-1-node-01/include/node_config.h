@@ -31,7 +31,7 @@ constexpr uint8_t kLed1Pin = 5;
 constexpr uint8_t kLed2Pin = 12;
 constexpr uint8_t kLed3Pin = 0;
 
-constexpr bool kRelay1ActiveHigh = true;
+constexpr bool kRelay1ActiveHigh = false;
 constexpr bool kRelay2ActiveHigh = false;
 constexpr bool kTouchActiveHigh = true;
 constexpr bool kLedActiveHigh = true;
