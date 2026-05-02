@@ -63,6 +63,38 @@ void Error_Handler(void);
 #define LED2_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
+#define X_STEP_Pin GPIO_PIN_0
+#define X_STEP_GPIO_Port GPIOB
+#define X_DIR_Pin GPIO_PIN_1
+#define X_DIR_GPIO_Port GPIOB
+#define X_EN_Pin GPIO_PIN_2
+#define X_EN_GPIO_Port GPIOB
+#define X_MIN_ENDSTOP_Pin GPIO_PIN_9
+#define X_MIN_ENDSTOP_GPIO_Port GPIOA
+#define X_MAX_ENDSTOP_Pin GPIO_PIN_0
+#define X_MAX_ENDSTOP_GPIO_Port GPIOC
+
+#define Y_STEP_Pin GPIO_PIN_8
+#define Y_STEP_GPIO_Port GPIOA
+#define Y_DIR_Pin GPIO_PIN_7
+#define Y_DIR_GPIO_Port GPIOC
+#define Y_EN_Pin GPIO_PIN_12
+#define Y_EN_GPIO_Port GPIOB
+#define Y_MIN_ENDSTOP_Pin GPIO_PIN_4
+#define Y_MIN_ENDSTOP_GPIO_Port GPIOB
+#define Y_MAX_ENDSTOP_Pin GPIO_PIN_5
+#define Y_MAX_ENDSTOP_GPIO_Port GPIOB
+
+#define Z_STEP_Pin GPIO_PIN_6
+#define Z_STEP_GPIO_Port GPIOB
+#define Z_DIR_Pin GPIO_PIN_1
+#define Z_DIR_GPIO_Port GPIOA
+#define Z_EN_Pin GPIO_PIN_13
+#define Z_EN_GPIO_Port GPIOB
+#define Z_MIN_ENDSTOP_Pin GPIO_PIN_10
+#define Z_MIN_ENDSTOP_GPIO_Port GPIOA
+#define Z_MAX_ENDSTOP_Pin GPIO_PIN_11
+#define Z_MAX_ENDSTOP_GPIO_Port GPIOA
 
 /* USER CODE END Private defines */
 
