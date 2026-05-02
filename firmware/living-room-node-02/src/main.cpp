@@ -25,6 +25,11 @@ enum class LedMode : uint8_t {
   Candle,
 };
 
+enum class LedDrive : uint8_t {
+  Off,
+  Red,
+};
+
 struct ChannelState {
   const char* key;
   uint8_t relay_pin;
@@ -34,15 +39,12 @@ struct ChannelState {
   bool relay_on;
   bool touch_active;
   bool last_touch_raw;
-  unsigned long last_touch_raw_change_ms;
-  unsigned long last_touch_toggle_ms;
-  bool touch_armed;
   LedMode led_mode;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, 0, true, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, 0, true, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, LedMode::Auto},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, LedMode::Auto},
 };
 
 unsigned long last_telemetry_ms = 0;
@@ -61,9 +63,6 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 250;
-constexpr unsigned long kTouchReleaseDebounceMs = 120;
-constexpr unsigned long kTouchRetriggerGuardMs = 2500;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -144,21 +143,71 @@ bool read_touch_active(uint8_t pin) {
   return NodeConfig::kTouchActiveHigh ? (raw == HIGH) : (raw == LOW);
 }
 
-void write_led_level(uint8_t pin, uint16_t level) {
-  const bool on = level > 0;
-  digitalWrite(pin, as_output_level(on, NodeConfig::kLedActiveHigh) ? HIGH : LOW);
+void write_led_drive(uint8_t pin, LedDrive drive) {
+  if (drive == LedDrive::Off) {
+    pinMode(pin, INPUT);
+    return;
+  }
+
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, drive == LedDrive::Red ? HIGH : LOW);
+}
+
+bool led_blink_on(LedMode mode, unsigned long now) {
+  switch (mode) {
+    case LedMode::BlinkSlow:
+      return (now % 1200UL) < 600UL;
+    case LedMode::BlinkFast:
+      return (now % 360UL) < 180UL;
+    case LedMode::DoubleBlink: {
+      const unsigned long phase = now % 1600UL;
+      return phase < 120UL || (phase >= 260UL && phase < 380UL);
+    }
+    case LedMode::Heartbeat: {
+      const unsigned long phase = now % 1800UL;
+      return phase < 90UL || (phase >= 180UL && phase < 270UL);
+    }
+    case LedMode::Breathe:
+    case LedMode::Pulse:
+      return (now % NodeConfig::kLedBreathPeriodMs) < (NodeConfig::kLedBreathPeriodMs / 2U);
+    case LedMode::Candle:
+      return ((now / 137UL) % 5UL) != 0UL;
+    default:
+      return true;
+  }
+}
+
+LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
+  switch (channel.led_mode) {
+    case LedMode::On:
+      return LedDrive::Red;
+    case LedMode::Off:
+      return LedDrive::Off;
+    case LedMode::BlinkSlow:
+    case LedMode::BlinkFast:
+    case LedMode::DoubleBlink:
+    case LedMode::Heartbeat:
+    case LedMode::Breathe:
+    case LedMode::Pulse:
+    case LedMode::Candle:
+      return led_blink_on(channel.led_mode, now) ? LedDrive::Red : LedDrive::Off;
+    case LedMode::Auto:
+    default:
+      return channel.relay_on ? LedDrive::Red : LedDrive::Off;
+  }
 }
 
 void update_leds() {
   if (!mqtt_client.connected()) {
     for (auto& channel : channels) {
-      write_led_level(channel.led_pin, 0);
+      write_led_drive(channel.led_pin, LedDrive::Off);
     }
     return;
   }
+
+  const unsigned long now = millis();
   for (auto& channel : channels) {
-    const uint16_t level = channel.relay_on ? 255 : 0;
-    write_led_level(channel.led_pin, level);
+    write_led_drive(channel.led_pin, led_drive_for_channel(channel, now));
   }
 }
 
@@ -443,47 +492,22 @@ void ensure_time() {
 }
 
 void poll_touch_inputs() {
-  const unsigned long now = millis();
   const bool raw_touch_1 = read_touch_active(channels[0].touch_pin);
   const bool raw_touch_2 = read_touch_active(channels[1].touch_pin);
-  const bool simultaneous_raw_touch = raw_touch_1 && raw_touch_2;
 
   for (size_t index = 0; index < (sizeof(channels) / sizeof(channels[0])); ++index) {
     auto& channel = channels[index];
     const bool raw = index == 0 ? raw_touch_1 : raw_touch_2;
-    if (raw != channel.last_touch_raw) {
-      channel.last_touch_raw = raw;
-      channel.last_touch_raw_change_ms = now;
-    }
-
-    if (simultaneous_raw_touch) {
-      if (channel.touch_active != raw) {
-        channel.touch_active = raw;
-        telemetry_dirty = true;
-      }
-      channel.touch_armed = false;
-      continue;
-    }
-
     if (raw == channel.touch_active) {
+      channel.last_touch_raw = raw;
       continue;
     }
 
-    const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
-    if ((now - channel.last_touch_raw_change_ms) < debounce_ms) {
-      continue;
-    }
-
+    const bool was_active = channel.touch_active;
+    channel.last_touch_raw = raw;
     channel.touch_active = raw;
     telemetry_dirty = true;
-    if (!channel.touch_active) {
-      channel.touch_armed = true;
-      continue;
-    }
-
-    if (channel.touch_armed && (now - channel.last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
-      channel.touch_armed = false;
-      channel.last_touch_toggle_ms = now;
+    if (!was_active && channel.touch_active) {
       toggle_channel(channel, "touch_toggle");
     }
   }
@@ -496,9 +520,6 @@ void init_gpio() {
     pinMode(channel.touch_pin, INPUT);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
     channel.touch_active = channel.last_touch_raw;
-    channel.last_touch_raw_change_ms = millis();
-    channel.last_touch_toggle_ms = 0;
-    channel.touch_armed = !channel.touch_active;
     apply_channel_output(channel);
   }
 }
