@@ -96,6 +96,37 @@ void Error_Handler(void);
 #define Z_MAX_ENDSTOP_Pin GPIO_PIN_11
 #define Z_MAX_ENDSTOP_GPIO_Port GPIOA
 
+#define LED_PWM_1_Pin GPIO_PIN_4
+#define LED_PWM_1_GPIO_Port GPIOA
+#define LED_PWM_2_Pin GPIO_PIN_6
+#define LED_PWM_2_GPIO_Port GPIOA
+#define LED_PWM_3_Pin GPIO_PIN_7
+#define LED_PWM_3_GPIO_Port GPIOA
+#define LED_PWM_4_Pin GPIO_PIN_12
+#define LED_PWM_4_GPIO_Port GPIOA
+#define LED_PWM_5_Pin GPIO_PIN_15
+#define LED_PWM_5_GPIO_Port GPIOA
+#define LED_PWM_6_Pin GPIO_PIN_3
+#define LED_PWM_6_GPIO_Port GPIOB
+#define LED_PWM_7_Pin GPIO_PIN_7
+#define LED_PWM_7_GPIO_Port GPIOB
+#define LED_PWM_8_Pin GPIO_PIN_8
+#define LED_PWM_8_GPIO_Port GPIOB
+#define LED_PWM_9_Pin GPIO_PIN_9
+#define LED_PWM_9_GPIO_Port GPIOB
+#define LED_PWM_10_Pin GPIO_PIN_10
+#define LED_PWM_10_GPIO_Port GPIOB
+#define LED_PWM_11_Pin GPIO_PIN_11
+#define LED_PWM_11_GPIO_Port GPIOB
+
+#define LEDFAN_PWM_1_Pin GPIO_PIN_14
+#define LEDFAN_PWM_1_GPIO_Port GPIOB
+#define LEDFAN_PWM_2_Pin GPIO_PIN_15
+#define LEDFAN_PWM_2_GPIO_Port GPIOB
+
+#define LED_SINK_NTC_Pin GPIO_PIN_0
+#define LED_SINK_NTC_GPIO_Port GPIOA
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

@@ -10,11 +10,13 @@
 #include "main.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+ADC_HandleTypeDef hadc1;
 UART_HandleTypeDef huart1;
 
 typedef struct
@@ -49,13 +51,34 @@ typedef struct
   uint8_t state_dirty;
 } AxisState;
 
+typedef struct
+{
+  const char *key;
+  GPIO_TypeDef *port;
+  uint16_t pin;
+  uint16_t duty;
+  uint8_t dirty;
+} PwmChannel;
+
+typedef struct
+{
+  const char *key;
+  uint32_t adc_channel;
+  uint32_t filtered_raw;
+  uint8_t filter_ready;
+} TemperatureChannel;
+
 #define AXIS_COUNT                 3U
+#define LED_PWM_COUNT             11U
+#define FAN_PWM_COUNT              2U
 #define STEP_PULSE_HIGH_US         5U
 #define DEFAULT_TRAVEL_STEPS       100000U
 #define DEFAULT_MOVE_INTERVAL_US   160U
 #define DEFAULT_HOME_INTERVAL_US   900U
 #define STATUS_INTERVAL_MS         1000U
 #define RX_LINE_MAX                96U
+#define PWM_PERIOD_US              1000U
+#define PWM_MAX_DUTY               1000U
 
 static AxisState axes[AXIS_COUNT] = {
   {
@@ -105,8 +128,33 @@ static AxisState axes[AXIS_COUNT] = {
   },
 };
 
+static PwmChannel led_pwm[LED_PWM_COUNT] = {
+  {"led1", LED_PWM_1_GPIO_Port, LED_PWM_1_Pin, 0U, 0U},
+  {"led2", LED_PWM_2_GPIO_Port, LED_PWM_2_Pin, 0U, 0U},
+  {"led3", LED_PWM_3_GPIO_Port, LED_PWM_3_Pin, 0U, 0U},
+  {"led4", LED_PWM_4_GPIO_Port, LED_PWM_4_Pin, 0U, 0U},
+  {"led5", LED_PWM_5_GPIO_Port, LED_PWM_5_Pin, 0U, 0U},
+  {"led6", LED_PWM_6_GPIO_Port, LED_PWM_6_Pin, 0U, 0U},
+  {"led7", LED_PWM_7_GPIO_Port, LED_PWM_7_Pin, 0U, 0U},
+  {"led8", LED_PWM_8_GPIO_Port, LED_PWM_8_Pin, 0U, 0U},
+  {"led9", LED_PWM_9_GPIO_Port, LED_PWM_9_Pin, 0U, 0U},
+  {"led10", LED_PWM_10_GPIO_Port, LED_PWM_10_Pin, 0U, 0U},
+  {"led11", LED_PWM_11_GPIO_Port, LED_PWM_11_Pin, 0U, 0U},
+};
+
+static PwmChannel fan_pwm[FAN_PWM_COUNT] = {
+  {"ledfan1", LEDFAN_PWM_1_GPIO_Port, LEDFAN_PWM_1_Pin, 0U, 0U},
+  {"ledfan2", LEDFAN_PWM_2_GPIO_Port, LEDFAN_PWM_2_Pin, 0U, 0U},
+};
+
+static TemperatureChannel led_sink_temperature = {
+  .key = "led_sink",
+  .adc_channel = ADC_CHANNEL_1,
+};
+
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_ADC1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void axis_emit_state(const AxisState *axis);
 static void axis_enable(AxisState *axis, uint8_t enabled);
@@ -115,8 +163,17 @@ static void axis_start_move(AxisState *axis, int32_t direction, uint32_t steps, 
 static void axis_stop(AxisState *axis, const char *reason);
 static void dwt_init(void);
 static void emit_all_states(void);
+static void emit_full_status(void);
 static void handle_line(char *line);
 static void poll_uart(void);
+static void pwm_service(uint32_t now_us);
+static void emit_pwm_state(const char *group, const PwmChannel *channel);
+static void emit_pwm_group(const char *group, PwmChannel *channels, uint32_t count);
+static void handle_pwm_command(const char *group, PwmChannel *channels, uint32_t count, char *arg1);
+static uint32_t read_adc_channel(uint32_t channel);
+static uint32_t filter_temperature_raw(TemperatureChannel *sensor, uint32_t raw);
+static int32_t ntc_raw_to_centi_c(uint32_t raw);
+static void emit_temperature_state(TemperatureChannel *sensor);
 static AxisState *find_axis(const char *key);
 static GPIO_PinState dir_level(int32_t direction);
 static uint32_t micros_now(void);
