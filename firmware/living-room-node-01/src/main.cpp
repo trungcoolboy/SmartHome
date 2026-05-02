@@ -33,8 +33,6 @@ unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
 unsigned long last_wifi_begin_ms = 0;
 unsigned long last_mqtt_attempt_ms = 0;
-unsigned long last_touch_raw_change_ms = 0;
-unsigned long last_touch_toggle_ms = 0;
 unsigned long last_local_action_ms = 0;
 unsigned long mqtt_retry_backoff_ms = 2000;
 bool wifi_begin_called = false;
@@ -43,13 +41,9 @@ bool state_dirty = false;
 const char* pending_event = "state_sync";
 const char* pending_detail = nullptr;
 bool time_configured = false;
-bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 250;
-constexpr unsigned long kTouchReleaseDebounceMs = 120;
-constexpr unsigned long kTouchRetriggerGuardMs = 2500;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -414,39 +408,20 @@ void init_gpio() {
   apply_output();
   last_touch_raw = read_touch_active();
   touch_active = last_touch_raw;
-  last_touch_raw_change_ms = millis();
-  last_touch_toggle_ms = 0;
-  touch_armed = !touch_active;
 }
 
 void poll_touch() {
   const bool raw = read_touch_active();
-  const unsigned long now = millis();
-  if (raw != last_touch_raw) {
-    last_touch_raw = raw;
-    last_touch_raw_change_ms = now;
-  }
-
   if (raw == touch_active) {
+    last_touch_raw = raw;
     return;
   }
 
-  const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
-  if ((now - last_touch_raw_change_ms) < debounce_ms) {
-    return;
-  }
-
+  const bool was_active = touch_active;
+  last_touch_raw = raw;
   touch_active = raw;
-  if (!touch_active) {
-    touch_armed = true;
-    telemetry_dirty = true;
-    queue_state("touch_release");
-    return;
-  }
-
-  if (touch_armed && (now - last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
-    touch_armed = false;
-    last_touch_toggle_ms = now;
+  telemetry_dirty = true;
+  if (!was_active && touch_active) {
     toggle_relay("touch_toggle");
   }
 }
