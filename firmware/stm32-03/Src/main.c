@@ -292,6 +292,223 @@ static void emit_all_states(void)
   }
 }
 
+static void pwm_service(uint32_t now_us)
+{
+  static uint32_t period_start_us = 0U;
+  uint32_t phase_us = now_us - period_start_us;
+
+  if (phase_us >= PWM_PERIOD_US)
+  {
+    period_start_us += (phase_us / PWM_PERIOD_US) * PWM_PERIOD_US;
+    phase_us = now_us - period_start_us;
+  }
+
+  for (uint32_t i = 0; i < LED_PWM_COUNT; i++)
+  {
+    GPIO_PinState state = (phase_us < led_pwm[i].duty) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+    HAL_GPIO_WritePin(led_pwm[i].port, led_pwm[i].pin, state);
+  }
+  for (uint32_t i = 0; i < FAN_PWM_COUNT; i++)
+  {
+    GPIO_PinState state = (phase_us < fan_pwm[i].duty) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+    HAL_GPIO_WritePin(fan_pwm[i].port, fan_pwm[i].pin, state);
+  }
+}
+
+static void emit_pwm_state(const char *group, const PwmChannel *channel)
+{
+  printf("%s %s pwm %lu\r\n", group, channel->key, (unsigned long)channel->duty);
+}
+
+static void emit_pwm_group(const char *group, PwmChannel *channels, uint32_t count)
+{
+  for (uint32_t i = 0; i < count; i++)
+  {
+    emit_pwm_state(group, &channels[i]);
+    channels[i].dirty = 0U;
+  }
+}
+
+static uint16_t parse_pwm_duty(const char *value)
+{
+  long duty = strtol(value, NULL, 10);
+  if (duty < 0L)
+  {
+    duty = 0L;
+  }
+  if (duty > (long)PWM_MAX_DUTY)
+  {
+    duty = (long)PWM_MAX_DUTY;
+  }
+  return (uint16_t)duty;
+}
+
+static void handle_pwm_command(const char *group, PwmChannel *channels, uint32_t count, char *arg1)
+{
+  char *arg2 = strtok(NULL, " ");
+  if (arg1 == NULL || strcmp(arg1, "status") == 0)
+  {
+    emit_pwm_group(group, channels, count);
+    return;
+  }
+  if (strcmp(arg1, "all") == 0 && arg2 != NULL)
+  {
+    uint16_t duty = parse_pwm_duty(arg2);
+    for (uint32_t i = 0; i < count; i++)
+    {
+      channels[i].duty = duty;
+      channels[i].dirty = 1U;
+      emit_pwm_state(group, &channels[i]);
+      channels[i].dirty = 0U;
+    }
+    return;
+  }
+
+  char key[16];
+  if (arg1[0] >= '0' && arg1[0] <= '9')
+  {
+    snprintf(key, sizeof(key), "%s%ld", strcmp(group, "led") == 0 ? "led" : "ledfan", strtol(arg1, NULL, 10));
+    arg1 = key;
+  }
+
+  if (arg2 == NULL)
+  {
+    printf("err %s args\r\n", group);
+    return;
+  }
+
+  for (uint32_t i = 0; i < count; i++)
+  {
+    if (strcmp(channels[i].key, arg1) == 0)
+    {
+      channels[i].duty = parse_pwm_duty(arg2);
+      channels[i].dirty = 1U;
+      emit_pwm_state(group, &channels[i]);
+      channels[i].dirty = 0U;
+      return;
+    }
+  }
+
+  printf("err %s unknown_channel %s\r\n", group, arg1);
+}
+
+static uint32_t read_adc_channel(uint32_t channel)
+{
+  const uint32_t sample_count = 16U;
+  ADC_ChannelConfTypeDef config = {0};
+  uint32_t total = 0U;
+  uint32_t min_raw = 4095U;
+  uint32_t max_raw = 0U;
+
+  config.Channel = channel;
+  config.Rank = ADC_REGULAR_RANK_1;
+  config.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  config.SingleDiff = ADC_SINGLE_ENDED;
+  config.OffsetNumber = ADC_OFFSET_NONE;
+  config.Offset = 0U;
+
+  if (HAL_ADC_ConfigChannel(&hadc1, &config) != HAL_OK)
+  {
+    return 0U;
+  }
+
+  for (uint32_t i = 0U; i < sample_count; i++)
+  {
+    uint32_t raw;
+    if (HAL_ADC_Start(&hadc1) != HAL_OK)
+    {
+      return 0U;
+    }
+    if (HAL_ADC_PollForConversion(&hadc1, 10U) != HAL_OK)
+    {
+      HAL_ADC_Stop(&hadc1);
+      return 0U;
+    }
+    raw = HAL_ADC_GetValue(&hadc1);
+    total += raw;
+    if (raw < min_raw)
+    {
+      min_raw = raw;
+    }
+    if (raw > max_raw)
+    {
+      max_raw = raw;
+    }
+    HAL_ADC_Stop(&hadc1);
+  }
+
+  return (total - min_raw - max_raw) / (sample_count - 2U);
+}
+
+static uint32_t filter_temperature_raw(TemperatureChannel *sensor, uint32_t raw)
+{
+  const uint32_t reset_threshold = 120U;
+  uint32_t diff = (raw > sensor->filtered_raw) ? (raw - sensor->filtered_raw) : (sensor->filtered_raw - raw);
+
+  if (sensor->filter_ready == 0U || diff > reset_threshold)
+  {
+    sensor->filtered_raw = raw;
+    sensor->filter_ready = 1U;
+    return raw;
+  }
+
+  if (diff > 0U)
+  {
+    const uint32_t step = (diff + 3U) / 4U;
+    sensor->filtered_raw = (raw > sensor->filtered_raw)
+      ? (sensor->filtered_raw + step)
+      : (sensor->filtered_raw - step);
+  }
+  return sensor->filtered_raw;
+}
+
+static int32_t ntc_raw_to_centi_c(uint32_t raw)
+{
+  const float adc_max = 4095.0f;
+  const float series_resistor = 10000.0f;
+  const float steinhart_a = 1.197512777807e-03f;
+  const float steinhart_b = 2.210033648808e-04f;
+  const float steinhart_c = 1.548507303609e-07f;
+
+  if (raw == 0U || raw >= 4095U)
+  {
+    return -12700;
+  }
+
+  const float raw_f = (float)raw;
+  const float ntc_resistance = series_resistor * raw_f / (adc_max - raw_f);
+  const float log_r = logf(ntc_resistance);
+  const float inv_kelvin = steinhart_a + (steinhart_b * log_r) + (steinhart_c * log_r * log_r * log_r);
+  const float celsius = (1.0f / inv_kelvin) - 273.15f;
+
+  return (int32_t)((celsius * 100.0f) + (celsius >= 0.0f ? 0.5f : -0.5f));
+}
+
+static void emit_temperature_state(TemperatureChannel *sensor)
+{
+  const uint32_t raw = filter_temperature_raw(sensor, read_adc_channel(sensor->adc_channel));
+  const int32_t centi_c = ntc_raw_to_centi_c(raw);
+  const int32_t abs_centi_c = labs(centi_c);
+  const int32_t whole = abs_centi_c / 100;
+  const int32_t fraction = abs_centi_c % 100;
+
+  printf(
+    "temp %s %s%ld.%02ld raw %lu\r\n",
+    sensor->key,
+    (centi_c < 0) ? "-" : "",
+    (long)whole,
+    (long)fraction,
+    (unsigned long)raw);
+}
+
+static void emit_full_status(void)
+{
+  emit_all_states();
+  emit_pwm_group("led", led_pwm, LED_PWM_COUNT);
+  emit_pwm_group("fan", fan_pwm, FAN_PWM_COUNT);
+  emit_temperature_state(&led_sink_temperature);
+}
+
 static void axis_start_move(AxisState *axis, int32_t direction, uint32_t steps, uint32_t interval_us, uint8_t continuous)
 {
   if (direction == 0 || (steps == 0U && continuous == 0U))
@@ -559,7 +776,7 @@ static void handle_line(char *line)
   }
   if (strcmp(root, "status") == 0)
   {
-    emit_all_states();
+    emit_full_status();
   }
   else if (strcmp(root, "pins") == 0)
   {
@@ -567,6 +784,21 @@ static void handle_line(char *line)
     printf("pins x step PB0 CN7-34 dir PB1 CN10-24 en PB2 CN10-22 min PA9 CN5-1 max PC0 CN7-38\r\n");
     printf("pins y step PA8 CN10-23 dir PC7 CN5-2 en PB12 min PB4 CN10-27 max PB5 CN10-29\r\n");
     printf("pins z step PB6 CN10-17 dir PA1 CN7-30 en PB13 min PA10 max PA11 CN10-14\r\n");
+    printf("pins led led1 PA4 led2 PA6 led3 PA7 led4 PA12 led5 PA15 led6 PB3 led7 PB7 led8 PB8 led9 PB9 led10 PB10 led11 PB11\r\n");
+    printf("pins fan ledfan1 PB14 ledfan2 PB15\r\n");
+    printf("pins temp led_sink PA0 ADC1_IN1\r\n");
+  }
+  else if (strcmp(root, "led") == 0)
+  {
+    handle_pwm_command("led", led_pwm, LED_PWM_COUNT, strtok(NULL, " "));
+  }
+  else if (strcmp(root, "fan") == 0 || strcmp(root, "ledfan") == 0)
+  {
+    handle_pwm_command("fan", fan_pwm, FAN_PWM_COUNT, strtok(NULL, " "));
+  }
+  else if (strcmp(root, "temp") == 0 || strcmp(root, "ntc") == 0)
+  {
+    emit_temperature_state(&led_sink_temperature);
   }
   else if (strcmp(root, "axis") == 0)
   {
@@ -635,17 +867,19 @@ int main(void)
   SystemClock_Config();
   dwt_init();
   MX_GPIO_Init();
+  MX_ADC1_Init();
   MX_USART1_UART_Init();
 
-  printf("\r\nSTM32G431RB #03 XYZ boot\r\n");
+  printf("\r\nSTM32G431RB #03 XYZ LED boot\r\n");
   printf("USART1 on PC4/PC5 via CN10-35/37, 115200 8N1\r\n");
-  printf("cmd: status | pins | axis x home/goto/move/jog/stop/zero/speed/travel | xyz goto/home/stop/status\r\n");
-  emit_all_states();
+  printf("cmd: status | pins | led 1 0..1000 | fan 1 0..1000 | temp | axis x home/goto/move/jog/stop/zero/speed/travel | xyz goto/home/stop/status\r\n");
+  emit_full_status();
 
   uint32_t last_status_ms = HAL_GetTick();
   while (1)
   {
     uint32_t now_us = micros_now();
+    pwm_service(now_us);
     poll_uart();
     for (uint32_t i = 0; i < AXIS_COUNT; i++)
     {
@@ -661,6 +895,7 @@ int main(void)
       last_status_ms = HAL_GetTick();
       HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
       emit_all_states();
+      emit_temperature_state(&led_sink_temperature);
     }
   }
 }
@@ -695,6 +930,56 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_ADC1_Init(void)
+{
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+  ADC_MultiModeTypeDef multimode = {0};
+
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC12;
+  PeriphClkInit.Adc12ClockSelection = RCC_ADC12CLKSOURCE_SYSCLK;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  __HAL_RCC_ADC12_CLK_ENABLE();
+
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.GainCompensation = 0U;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.LowPowerAutoWait = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.NbrOfConversion = 1U;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.NbrOfDiscConversion = 1U;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.SamplingMode = ADC_SAMPLING_MODE_NORMAL;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
+  hadc1.Init.OversamplingMode = DISABLE;
+
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  multimode.Mode = ADC_MODE_INDEPENDENT;
+  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
   {
     Error_Handler();
   }
@@ -749,6 +1034,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(X_EN_GPIO_Port, X_EN_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(Y_EN_GPIO_Port, Y_EN_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(Z_EN_GPIO_Port, Z_EN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOA, LED_PWM_1_Pin|LED_PWM_2_Pin|LED_PWM_3_Pin|LED_PWM_4_Pin|LED_PWM_5_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED_PWM_6_Pin|LED_PWM_7_Pin|LED_PWM_8_Pin|LED_PWM_9_Pin|LED_PWM_10_Pin|LED_PWM_11_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LEDFAN_PWM_1_Pin|LEDFAN_PWM_2_Pin, GPIO_PIN_RESET);
 
   GPIO_InitStruct.Pin = LED2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -756,13 +1044,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED2_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = Y_STEP_Pin|Z_DIR_Pin;
+  GPIO_InitStruct.Pin = Y_STEP_Pin|Z_DIR_Pin|LED_PWM_1_Pin|LED_PWM_2_Pin|LED_PWM_3_Pin|LED_PWM_4_Pin|LED_PWM_5_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = X_STEP_Pin|X_DIR_Pin|X_EN_Pin|Y_EN_Pin|Z_STEP_Pin|Z_EN_Pin;
+  GPIO_InitStruct.Pin = X_STEP_Pin|X_DIR_Pin|X_EN_Pin|Y_EN_Pin|Z_STEP_Pin|Z_EN_Pin
+    |LED_PWM_6_Pin|LED_PWM_7_Pin|LED_PWM_8_Pin|LED_PWM_9_Pin|LED_PWM_10_Pin|LED_PWM_11_Pin
+    |LEDFAN_PWM_1_Pin|LEDFAN_PWM_2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -788,6 +1078,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = LED_SINK_NTC_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(LED_SINK_NTC_GPIO_Port, &GPIO_InitStruct);
 }
 
 PUTCHAR_PROTOTYPE
