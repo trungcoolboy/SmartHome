@@ -36,15 +36,13 @@ struct ChannelState {
   bool touch_active;
   bool last_touch_raw;
   unsigned long last_touch_raw_change_ms;
-  unsigned long last_touch_toggle_ms;
-  bool touch_armed;
   LedMode led_mode;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, 0, true, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, 0, true, LedMode::Auto},
-  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, 0, true, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, LedMode::Auto},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, LedMode::Auto},
+  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, LedMode::Auto},
 };
 
 constexpr char kRemoteNode02CommandTopic[] = "smarthome/bathroom-1-node-02/command";
@@ -70,7 +68,6 @@ constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
 constexpr unsigned long kTouchPressDebounceMs = 250;
 constexpr unsigned long kTouchReleaseDebounceMs = 120;
-constexpr unsigned long kTouchRetriggerGuardMs = 2500;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -576,20 +573,15 @@ void poll_touch_inputs() {
     channel.touch_active = raw;
     apply_channel_output(channel);
     if (!channel.touch_active) {
-      channel.touch_armed = true;
       telemetry_dirty = true;
       queue_state("touch_release", channel.key);
       continue;
     }
 
-    if (channel.touch_armed && (now - channel.last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
-      channel.touch_armed = false;
-      channel.last_touch_toggle_ms = now;
-      if (channel.has_relay) {
-        toggle_channel(channel, "touch_toggle");
-      } else {
-        handle_aux_touch(channel);
-      }
+    if (channel.has_relay) {
+      toggle_channel(channel, "touch_toggle");
+    } else {
+      handle_aux_touch(channel);
     }
   }
 }
@@ -605,8 +597,6 @@ void init_gpio() {
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
     channel.touch_active = channel.last_touch_raw;
     channel.last_touch_raw_change_ms = millis();
-    channel.last_touch_toggle_ms = 0;
-    channel.touch_armed = !channel.touch_active;
     apply_channel_output(channel);
   }
 }
