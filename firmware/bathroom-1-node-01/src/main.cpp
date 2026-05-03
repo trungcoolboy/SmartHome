@@ -73,7 +73,6 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchDebounceMs = 40;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -195,6 +194,7 @@ void write_led_drive(uint8_t pin, LedDrive drive) {
 void update_leds() {
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
+    channel.led_drive = channel.has_relay && channel.relay_on ? LedDrive::Red : LedDrive::Off;
     write_led_drive(channel.led_pin, channel.led_drive);
   }
 }
@@ -202,6 +202,7 @@ void update_leds() {
 void apply_channel_output(ChannelState& channel) {
   if (channel.has_relay) {
     digitalWrite(channel.relay_pin, as_output_level(channel.relay_on, channel.relay_active_high) ? HIGH : LOW);
+    update_leds();
   }
 }
 
@@ -350,19 +351,12 @@ void toggle_channel(ChannelState& channel, const char* event) {
 
 void set_channel_led_mode(ChannelState& channel, LedMode mode, const char* event) {
   channel.led_mode = mode;
-  if (mode == LedMode::On) {
-    channel.led_drive = LedDrive::Red;
-  } else if (mode == LedMode::Off) {
-    channel.led_drive = LedDrive::Off;
-  }
   update_leds();
   telemetry_dirty = true;
   queue_state(event, channel.key, led_drive_name(channel.led_drive));
 }
 
 void set_channel_led_drive(ChannelState& channel, LedDrive drive, const char* event) {
-  channel.led_drive = drive;
-  channel.led_mode = drive == LedDrive::Red ? LedMode::On : LedMode::Off;
   update_leds();
   telemetry_dirty = true;
   queue_state(event, channel.key, led_drive_name(channel.led_drive));
@@ -569,35 +563,29 @@ void setup_ota() {
 }
 
 void poll_touch_inputs() {
-  const unsigned long now = millis();
+  const bool raw_touch_1 = read_touch_active(channels[0].touch_pin);
+  const bool raw_touch_2 = read_touch_active(channels[1].touch_pin);
+  const bool raw_touch_3 = read_touch_active(channels[2].touch_pin);
 
-  for (auto& channel : channels) {
-    const bool raw_touch = read_touch_active(channel.touch_pin);
-    if (raw_touch != channel.last_touch_raw) {
-      channel.last_touch_raw = raw_touch;
-      channel.last_touch_raw_change_ms = now;
-    }
-
-    if ((now - channel.last_touch_raw_change_ms) <= kTouchDebounceMs) {
+  for (size_t index = 0; index < (sizeof(channels) / sizeof(channels[0])); ++index) {
+    auto& channel = channels[index];
+    const bool raw = index == 0 ? raw_touch_1 : (index == 1 ? raw_touch_2 : raw_touch_3);
+    if (raw == channel.touch_active) {
+      channel.last_touch_raw = raw;
       continue;
     }
 
-    if (channel.touch_active == raw_touch) {
-      continue;
-    }
-
-    channel.touch_active = raw_touch;
+    const bool was_active = channel.touch_active;
+    channel.last_touch_raw = raw;
+    channel.touch_active = raw;
     telemetry_dirty = true;
 
-    if (!channel.touch_active) {
-      queue_state("touch_release", channel.key);
-      continue;
-    }
-
-    if (channel.has_relay) {
-      toggle_channel(channel, "touch_toggle");
-    } else {
-      handle_aux_touch(channel);
+    if (!was_active && channel.touch_active) {
+      if (channel.has_relay) {
+        toggle_channel(channel, "touch_toggle");
+      } else {
+        handle_aux_touch(channel);
+      }
     }
   }
 }
@@ -661,5 +649,4 @@ void loop() {
         channels[2].touch_active ? "on" : "off");
   }
 
-  delay(5);
 }
