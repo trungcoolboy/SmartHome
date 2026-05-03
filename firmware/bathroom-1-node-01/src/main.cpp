@@ -73,8 +73,7 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 250;
-constexpr unsigned long kTouchReleaseDebounceMs = 120;
+constexpr unsigned long kTouchDebounceMs = 40;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -204,7 +203,6 @@ void apply_channel_output(ChannelState& channel) {
   if (channel.has_relay) {
     digitalWrite(channel.relay_pin, as_output_level(channel.relay_on, channel.relay_active_high) ? HIGH : LOW);
   }
-  update_leds();
 }
 
 bool publish_availability(const char* value) {
@@ -402,7 +400,6 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
       remote_node02_relay_on = next_relay;
       telemetry_dirty = true;
       queue_state("remote_state_sync", "touch3", remote_node02_relay_on ? "on" : "off");
-      update_leds();
     }
     return;
   }
@@ -575,25 +572,24 @@ void poll_touch_inputs() {
   const unsigned long now = millis();
 
   for (auto& channel : channels) {
-    const bool raw = read_touch_active(channel.touch_pin);
-    if (raw != channel.last_touch_raw) {
-      channel.last_touch_raw = raw;
+    const bool raw_touch = read_touch_active(channel.touch_pin);
+    if (raw_touch != channel.last_touch_raw) {
+      channel.last_touch_raw = raw_touch;
       channel.last_touch_raw_change_ms = now;
     }
 
-    if (raw == channel.touch_active) {
+    if ((now - channel.last_touch_raw_change_ms) <= kTouchDebounceMs) {
       continue;
     }
 
-    const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
-    if ((now - channel.last_touch_raw_change_ms) < debounce_ms) {
+    if (channel.touch_active == raw_touch) {
       continue;
     }
 
-    channel.touch_active = raw;
-    apply_channel_output(channel);
+    channel.touch_active = raw_touch;
+    telemetry_dirty = true;
+
     if (!channel.touch_active) {
-      telemetry_dirty = true;
       queue_state("touch_release", channel.key);
       continue;
     }
@@ -649,7 +645,6 @@ void loop() {
   ArduinoOTA.handle();
   mqtt_client.loop();
   poll_touch_inputs();
-  update_leds();
   flush_pending_mqtt();
 
   const unsigned long now = millis();
@@ -665,4 +660,6 @@ void loop() {
         channels[1].relay_on ? "on" : "off",
         channels[2].touch_active ? "on" : "off");
   }
+
+  delay(5);
 }
