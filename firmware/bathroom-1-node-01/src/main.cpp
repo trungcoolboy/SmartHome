@@ -25,6 +25,12 @@ enum class LedMode : uint8_t {
   Candle,
 };
 
+enum class LedDrive : uint8_t {
+  Off,
+  Red,
+  Green,
+};
+
 struct ChannelState {
   const char* key;
   uint8_t relay_pin;
@@ -37,12 +43,13 @@ struct ChannelState {
   bool last_touch_raw;
   unsigned long last_touch_raw_change_ms;
   LedMode led_mode;
+  LedDrive led_drive;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, LedMode::Auto},
-  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, LedMode::Auto, LedDrive::Off},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, LedMode::Auto, LedDrive::Off},
+  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, LedMode::Auto, LedDrive::Off},
 };
 
 constexpr char kRemoteNode02CommandTopic[] = "smarthome/bathroom-1-node-02/command";
@@ -143,93 +150,53 @@ bool parse_led_mode(const char* value, LedMode& mode) {
   return false;
 }
 
+const char* led_drive_name(LedDrive drive) {
+  switch (drive) {
+    case LedDrive::Red:
+      return "red";
+    case LedDrive::Green:
+      return "green";
+    case LedDrive::Off:
+    default:
+      return "off";
+  }
+}
+
+bool parse_led_drive(const char* value, LedDrive& drive) {
+  if (strcmp(value, "red") == 0 || strcmp(value, "high") == 0 || strcmp(value, "on") == 0) {
+    drive = LedDrive::Red;
+    return true;
+  }
+  if (strcmp(value, "green") == 0 || strcmp(value, "low") == 0) {
+    drive = LedDrive::Green;
+    return true;
+  }
+  if (strcmp(value, "off") == 0 || strcmp(value, "hiz") == 0 || strcmp(value, "hi-z") == 0) {
+    drive = LedDrive::Off;
+    return true;
+  }
+  return false;
+}
+
 bool read_touch_active(uint8_t pin) {
   const int raw = digitalRead(pin);
   return NodeConfig::kTouchActiveHigh ? (raw == HIGH) : (raw == LOW);
 }
 
-void write_led_level(uint8_t pin, uint16_t level) {
-  analogWrite(pin, NodeConfig::kLedActiveHigh ? level : (255 - level));
-}
-
-bool is_led_breath_window() {
-  time_t now = time(nullptr);
-  if (now < 100000) {
-    return false;
+void write_led_drive(uint8_t pin, LedDrive drive) {
+  if (drive == LedDrive::Off) {
+    pinMode(pin, INPUT);
+    return;
   }
 
-  struct tm local_tm {};
-  localtime_r(&now, &local_tm);
-  const int hour = local_tm.tm_hour;
-  if (NodeConfig::kLedBreathStartHour > NodeConfig::kLedBreathEndHour) {
-    return hour >= NodeConfig::kLedBreathStartHour || hour < NodeConfig::kLedBreathEndHour;
-  }
-  return hour >= NodeConfig::kLedBreathStartHour && hour < NodeConfig::kLedBreathEndHour;
-}
-
-uint16_t current_led_level(LedMode mode, bool breath_window) {
-  const unsigned long now_ms = millis();
-  switch (mode) {
-    case LedMode::On:
-      return 255;
-    case LedMode::Off:
-      return 0;
-    case LedMode::Breathe:
-    case LedMode::Auto:
-    case LedMode::Pulse: {
-      if (mode == LedMode::Auto && !breath_window) {
-        return 0;
-      }
-      const unsigned long period = mode == LedMode::Pulse ? 1800 : NodeConfig::kLedBreathPeriodMs;
-      const unsigned long phase = now_ms % period;
-      const float half_period = period / 2.0f;
-      float ratio = phase <= half_period ? (phase / half_period) : ((period - phase) / half_period);
-      ratio = mode == LedMode::Pulse ? (0.04f + (0.96f * ratio)) : (0.12f + (0.88f * ratio));
-      return static_cast<uint16_t>(ratio * 255.0f);
-    }
-    case LedMode::BlinkSlow:
-      return ((now_ms / 700) % 2) ? 255 : 0;
-    case LedMode::BlinkFast:
-      return ((now_ms / 180) % 2) ? 255 : 0;
-    case LedMode::DoubleBlink: {
-      const unsigned long phase = now_ms % 1400;
-      return (phase < 120 || (phase >= 240 && phase < 360)) ? 255 : 0;
-    }
-    case LedMode::Heartbeat: {
-      const unsigned long phase = now_ms % 1500;
-      return (phase < 90 || (phase >= 140 && phase < 230)) ? 255 : 0;
-    }
-    case LedMode::Candle: {
-      const unsigned long phase = now_ms % 997;
-      const int base = 150 + static_cast<int>((phase * 73UL) % 70);
-      const int dip = (phase % 173 < 20) ? 60 : 0;
-      const int level = base - dip;
-      return level < 0 ? 0 : (level > 255 ? 255 : level);
-    }
-    default:
-      return 0;
-  }
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, drive == LedDrive::Red ? HIGH : LOW);
 }
 
 void update_leds() {
-  if (!mqtt_client.connected()) {
-    const uint16_t level = current_led_level(LedMode::BlinkFast, false);
-    for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
-      auto& channel = channels[i];
-      write_led_level(channel.led_pin, level);
-    }
-    return;
-  }
-  const bool breath = is_led_breath_window();
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
-    if (channel.has_relay) {
-      write_led_level(channel.led_pin, channel.relay_on ? 255 : 0);
-    } else if (strcmp(channel.key, "touch3") == 0) {
-      write_led_level(channel.led_pin, remote_node02_relay_on ? 255 : 0);
-    } else {
-      write_led_level(channel.led_pin, current_led_level(channel.led_mode, breath));
-    }
+    write_led_drive(channel.led_pin, channel.led_drive);
   }
 }
 
@@ -271,6 +238,8 @@ bool publish_state_now(const char* event, const char* channel_key = nullptr, con
     item["touchPin"] = channel.touch_pin;
     item["touchRaw"] = digitalRead(channel.touch_pin);
     item["touchActive"] = channel.touch_active;
+    item["ledPin"] = channel.led_pin;
+    item["led"] = led_drive_name(channel.led_drive);
     item["ledMode"] = led_mode_name(channel.led_mode);
     item["hasRelay"] = channel.has_relay;
     if (channel.has_relay) {
@@ -278,7 +247,7 @@ bool publish_state_now(const char* event, const char* channel_key = nullptr, con
     }
   }
 
-  char payload[512];
+  char payload[640];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
   return mqtt_client.publish(NodeConfig::kStateTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
 }
@@ -302,6 +271,8 @@ bool publish_telemetry_now() {
     item["touchPin"] = channel.touch_pin;
     item["touchRaw"] = digitalRead(channel.touch_pin);
     item["touchActive"] = channel.touch_active;
+    item["ledPin"] = channel.led_pin;
+    item["led"] = led_drive_name(channel.led_drive);
     item["ledMode"] = led_mode_name(channel.led_mode);
     item["hasRelay"] = channel.has_relay;
     if (channel.has_relay) {
@@ -310,7 +281,7 @@ bool publish_telemetry_now() {
   }
   doc["remoteRelay"] = remote_node02_relay_on;
 
-  char payload[576];
+  char payload[704];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
   return mqtt_client.publish(NodeConfig::kTelemetryTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
 }
