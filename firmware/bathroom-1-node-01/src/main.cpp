@@ -321,6 +321,19 @@ ChannelState* find_channel(const char* key) {
   return nullptr;
 }
 
+ChannelState* find_led_channel(const char* key) {
+  if (strcmp(key, "led1") == 0) {
+    return &channels[0];
+  }
+  if (strcmp(key, "led2") == 0) {
+    return &channels[1];
+  }
+  if (strcmp(key, "led3") == 0) {
+    return &channels[2];
+  }
+  return find_channel(key);
+}
+
 void set_channel(ChannelState& channel, bool on, const char* event) {
   if (!channel.has_relay) {
     queue_state("unsupported_channel_action", channel.key, event);
@@ -339,9 +352,22 @@ void toggle_channel(ChannelState& channel, const char* event) {
 
 void set_channel_led_mode(ChannelState& channel, LedMode mode, const char* event) {
   channel.led_mode = mode;
+  if (mode == LedMode::On) {
+    channel.led_drive = LedDrive::Red;
+  } else if (mode == LedMode::Off) {
+    channel.led_drive = LedDrive::Off;
+  }
   update_leds();
   telemetry_dirty = true;
-  queue_state(event, channel.key, led_mode_name(channel.led_mode));
+  queue_state(event, channel.key, led_drive_name(channel.led_drive));
+}
+
+void set_channel_led_drive(ChannelState& channel, LedDrive drive, const char* event) {
+  channel.led_drive = drive;
+  channel.led_mode = drive == LedDrive::Red ? LedMode::On : LedMode::Off;
+  update_leds();
+  telemetry_dirty = true;
+  queue_state(event, channel.key, led_drive_name(channel.led_drive));
 }
 
 void handle_aux_touch(ChannelState& channel) {
@@ -416,9 +442,32 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  if (strcmp(action, "set_led") == 0) {
+    const char* channel_key = doc["channel"] | "";
+    ChannelState* channel = find_led_channel(channel_key);
+    if (!channel) {
+      queue_state("unknown_led_channel", channel_key);
+      return;
+    }
+    const char* value = doc["value"] | "";
+    if (value[0] == '\0') {
+      value = doc["state"] | "";
+    }
+    if (value[0] == '\0') {
+      value = doc["color"] | "";
+    }
+    LedDrive drive = channel->led_drive;
+    if (!parse_led_drive(value, drive)) {
+      queue_state("bad_led_value", channel_key, value);
+      return;
+    }
+    set_channel_led_drive(*channel, drive, "led_updated");
+    return;
+  }
+
   if (strcmp(action, "set_led_mode") == 0) {
     const char* channel_key = doc["channel"] | "";
-    ChannelState* channel = find_channel(channel_key);
+    ChannelState* channel = find_led_channel(channel_key);
     if (!channel) {
       queue_state("unknown_channel", channel_key);
       return;
@@ -563,7 +612,7 @@ void init_gpio() {
     if (channel.has_relay) {
       pinMode(channel.relay_pin, OUTPUT);
     }
-    pinMode(channel.led_pin, OUTPUT);
+    write_led_drive(channel.led_pin, channel.led_drive);
     pinMode(channel.touch_pin, INPUT);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
     channel.touch_active = channel.last_touch_raw;
