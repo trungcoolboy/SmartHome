@@ -271,6 +271,8 @@ bool publish_state_now(const char* event, const char* channel_key = nullptr, con
   for (const auto& channel : channels) {
     JsonObject item = channel_states.add<JsonObject>();
     item["key"] = channel.key;
+    item["touchPin"] = channel.touch_pin;
+    item["touchRaw"] = digitalRead(channel.touch_pin);
     item["touchActive"] = channel.touch_active;
     item["ledMode"] = led_mode_name(channel.led_mode);
     item["hasRelay"] = channel.has_relay;
@@ -300,6 +302,8 @@ bool publish_telemetry_now() {
   for (const auto& channel : channels) {
     JsonObject item = channel_states.add<JsonObject>();
     item["key"] = channel.key;
+    item["touchPin"] = channel.touch_pin;
+    item["touchRaw"] = digitalRead(channel.touch_pin);
     item["touchActive"] = channel.touch_active;
     item["ledMode"] = led_mode_name(channel.led_mode);
     item["hasRelay"] = channel.has_relay;
