@@ -192,6 +192,16 @@ void write_led_drive(uint8_t pin, LedDrive drive) {
 }
 
 void update_leds() {
+  if (!mqtt_client.connected()) {
+    const LedDrive blink_drive = ((millis() / 360UL) % 2UL) == 0 ? LedDrive::Red : LedDrive::Green;
+    for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
+      auto& channel = channels[i];
+      channel.led_drive = blink_drive;
+      write_led_drive(channel.led_pin, channel.led_drive);
+    }
+    return;
+  }
+
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
     if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
@@ -639,6 +649,7 @@ void loop() {
   ArduinoOTA.handle();
   mqtt_client.loop();
   poll_touch_inputs();
+  update_leds();
   flush_pending_mqtt();
 
   const unsigned long now = millis();

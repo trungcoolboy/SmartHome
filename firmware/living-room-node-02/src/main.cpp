@@ -212,8 +212,9 @@ LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
 
 void update_leds() {
   if (!mqtt_client.connected()) {
+    const LedDrive blink_drive = ((millis() / 360UL) % 2UL) == 0 ? LedDrive::Red : LedDrive::Green;
     for (auto& channel : channels) {
-      write_led_drive(channel.led_pin, LedDrive::Green);
+      write_led_drive(channel.led_pin, blink_drive);
     }
     return;
   }
