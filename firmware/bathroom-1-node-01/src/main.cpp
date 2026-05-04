@@ -194,7 +194,11 @@ void write_led_drive(uint8_t pin, LedDrive drive) {
 void update_leds() {
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
-    channel.led_drive = channel.has_relay && channel.relay_on ? LedDrive::Red : LedDrive::Off;
+    if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
+      channel.led_drive = remote_node02_relay_on ? LedDrive::Red : LedDrive::Green;
+    } else {
+      channel.led_drive = channel.has_relay && channel.relay_on ? LedDrive::Red : LedDrive::Off;
+    }
     write_led_drive(channel.led_pin, channel.led_drive);
   }
 }

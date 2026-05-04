@@ -27,6 +27,9 @@ enum class LedDrive : uint8_t {
 LedDrive led_drive = LedDrive::Off;
 LedDrive led_override_drive = LedDrive::Off;
 unsigned long led_override_until_ms = 0;
+uint8_t probe_pin = 255;
+LedDrive probe_drive = LedDrive::Off;
+unsigned long probe_until_ms = 0;
 unsigned long last_touch_raw_change_ms = 0;
 unsigned long last_touch_toggle_ms = 0;
 unsigned long touch_ignore_until_ms = 0;
@@ -106,7 +109,64 @@ void write_led_drive(LedDrive drive) {
   }
 }
 
+void release_probe_pin() {
+  if (probe_pin == 255) {
+    return;
+  }
+  digitalWrite(probe_pin, LOW);
+  pinMode(probe_pin, INPUT);
+  probe_pin = 255;
+  probe_until_ms = 0;
+  probe_drive = LedDrive::Off;
+}
+
+bool is_probe_pin_allowed(uint8_t pin) {
+  switch (pin) {
+    case 0:
+    case 2:
+    case 4:
+    case 5:
+    case 12:
+    case 13:
+    case 14:
+    case 15:
+      return pin != NodeConfig::kTouchPin;
+    default:
+      return false;
+  }
+}
+
+void write_probe_pin(uint8_t pin, LedDrive drive, unsigned long duration_ms) {
+  release_probe_pin();
+  probe_pin = pin;
+  probe_drive = drive;
+  probe_until_ms = duration_ms == 0 ? 0 : millis() + duration_ms;
+
+  switch (drive) {
+    case LedDrive::Red:
+      pinMode(pin, OUTPUT);
+      digitalWrite(pin, HIGH);
+      break;
+    case LedDrive::Green:
+      pinMode(pin, OUTPUT);
+      digitalWrite(pin, LOW);
+      break;
+    case LedDrive::Off:
+    default:
+      digitalWrite(pin, LOW);
+      pinMode(pin, INPUT);
+      break;
+  }
+}
+
 void update_led() {
+  if (probe_pin != 255) {
+    if (probe_until_ms == 0 || static_cast<long>(millis() - probe_until_ms) < 0) {
+      return;
+    }
+    release_probe_pin();
+  }
+
   if (led_override_until_ms != 0 && static_cast<long>(millis() - led_override_until_ms) < 0) {
     write_led_drive(led_override_drive);
     return;
@@ -144,6 +204,11 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["touch"] = touch_active;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
+  doc["ledPin"] = NodeConfig::kLedPin;
+  if (probe_pin != 255) {
+    doc["probePin"] = probe_pin;
+    doc["probe"] = led_drive_name(probe_drive);
+  }
   if (detail && detail[0] != '\0') {
     doc["detail"] = detail;
   }
@@ -167,6 +232,11 @@ bool publish_telemetry_now() {
   doc["touch"] = touch_active;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
+  doc["ledPin"] = NodeConfig::kLedPin;
+  if (probe_pin != 255) {
+    doc["probePin"] = probe_pin;
+    doc["probe"] = led_drive_name(probe_drive);
+  }
 
   char payload[256];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
@@ -381,6 +451,26 @@ void handle_command(char* topic, const uint8_t* payload, unsigned int length) {
     led_override_until_ms = duration_ms == 0 ? 0 : millis() + duration_ms;
     write_led_drive(drive);
     queue_state("led_test", led_drive_name(drive));
+    telemetry_dirty = true;
+    return;
+  }
+  if (strcmp(action, "probe_led_pin") == 0) {
+    const int pin = doc["pin"] | -1;
+    if (!is_probe_pin_allowed(static_cast<uint8_t>(pin))) {
+      queue_state("bad_probe_pin");
+      telemetry_dirty = true;
+      return;
+    }
+    LedDrive drive = LedDrive::Off;
+    const char* value = doc["value"] | "";
+    if (!parse_led_drive(value, drive)) {
+      queue_state("bad_probe_value", value);
+      telemetry_dirty = true;
+      return;
+    }
+    const unsigned long duration_ms = doc["durationMs"] | 5000UL;
+    write_probe_pin(static_cast<uint8_t>(pin), drive, duration_ms);
+    queue_state("probe_led_pin", led_drive_name(drive));
     telemetry_dirty = true;
     return;
   }
