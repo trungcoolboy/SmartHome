@@ -28,6 +28,7 @@ enum class LedMode : uint8_t {
 enum class LedDrive : uint8_t {
   Off,
   Red,
+  Green,
 };
 
 struct ChannelState {
@@ -153,6 +154,18 @@ void write_led_drive(uint8_t pin, LedDrive drive) {
   digitalWrite(pin, drive == LedDrive::Red ? HIGH : LOW);
 }
 
+const char* led_drive_name(LedDrive drive) {
+  switch (drive) {
+    case LedDrive::Red:
+      return "red";
+    case LedDrive::Green:
+      return "green";
+    case LedDrive::Off:
+    default:
+      return "off";
+  }
+}
+
 bool led_blink_on(LedMode mode, unsigned long now) {
   switch (mode) {
     case LedMode::BlinkSlow:
@@ -182,7 +195,7 @@ LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
     case LedMode::On:
       return LedDrive::Red;
     case LedMode::Off:
-      return LedDrive::Off;
+      return LedDrive::Green;
     case LedMode::BlinkSlow:
     case LedMode::BlinkFast:
     case LedMode::DoubleBlink:
@@ -190,17 +203,17 @@ LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
     case LedMode::Breathe:
     case LedMode::Pulse:
     case LedMode::Candle:
-      return led_blink_on(channel.led_mode, now) ? LedDrive::Red : LedDrive::Off;
+      return led_blink_on(channel.led_mode, now) ? LedDrive::Red : LedDrive::Green;
     case LedMode::Auto:
     default:
-      return channel.relay_on ? LedDrive::Red : LedDrive::Off;
+      return channel.relay_on ? LedDrive::Red : LedDrive::Green;
   }
 }
 
 void update_leds() {
   if (!mqtt_client.connected()) {
     for (auto& channel : channels) {
-      write_led_drive(channel.led_pin, LedDrive::Off);
+      write_led_drive(channel.led_pin, LedDrive::Green);
     }
     return;
   }
@@ -244,11 +257,13 @@ bool publish_state_now(const char* event, const char* channel_key = nullptr, con
   }
 
   JsonArray relay_states = doc["relays"].to<JsonArray>();
+  const unsigned long now = millis();
   for (const auto& channel : channels) {
     JsonObject item = relay_states.add<JsonObject>();
     item["key"] = channel.key;
     item["on"] = channel.relay_on;
     item["ledMode"] = led_mode_name(channel.led_mode);
+    item["led"] = led_drive_name(led_drive_for_channel(channel, now));
   }
 
   char payload[320];
@@ -279,12 +294,14 @@ bool publish_telemetry_now() {
   doc["freeHeap"] = ESP.getFreeHeap();
 
   JsonArray relay_states = doc["relays"].to<JsonArray>();
+  const unsigned long now = millis();
   for (const auto& channel : channels) {
     JsonObject item = relay_states.add<JsonObject>();
     item["key"] = channel.key;
     item["on"] = channel.relay_on;
     item["touchActive"] = channel.touch_active;
     item["ledMode"] = led_mode_name(channel.led_mode);
+    item["led"] = led_drive_name(led_drive_for_channel(channel, now));
   }
 
   char payload[384];

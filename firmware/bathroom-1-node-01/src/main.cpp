@@ -196,8 +196,10 @@ void update_leds() {
     auto& channel = channels[i];
     if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
       channel.led_drive = remote_node02_relay_on ? LedDrive::Red : LedDrive::Green;
+    } else if (channel.has_relay) {
+      channel.led_drive = channel.relay_on ? LedDrive::Red : LedDrive::Green;
     } else {
-      channel.led_drive = channel.has_relay && channel.relay_on ? LedDrive::Red : LedDrive::Off;
+      channel.led_drive = LedDrive::Green;
     }
     write_led_drive(channel.led_pin, channel.led_drive);
   }
