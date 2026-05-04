@@ -14,11 +14,19 @@ PubSubClient mqtt_client(wifi_client);
 constexpr char kRemoteNode01CommandTopic[] = "smarthome/bedroom-2-node-01/command";
 constexpr char kRemoteNode01StateTopic[] = "smarthome/bedroom-2-node-01/state";
 constexpr char kRemoteNode01TelemetryTopic[] = "smarthome/bedroom-2-node-01/telemetry";
-constexpr bool kRemoteControlEnabled = false;
+constexpr bool kRemoteControlEnabled = true;
 
 bool touch_active = false;
 bool last_touch_raw = false;
 bool remote_relay_on = false;
+enum class LedDrive : uint8_t {
+  Off,
+  Red,
+  Green,
+};
+LedDrive led_drive = LedDrive::Off;
+LedDrive led_override_drive = LedDrive::Off;
+unsigned long led_override_until_ms = 0;
 unsigned long last_touch_raw_change_ms = 0;
 unsigned long last_touch_toggle_ms = 0;
 unsigned long touch_ignore_until_ms = 0;
@@ -39,32 +47,81 @@ bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 450;
-constexpr unsigned long kTouchReleaseDebounceMs = 200;
-constexpr unsigned long kTouchRetriggerGuardMs = 2500;
-constexpr unsigned long kTouchIgnoreAfterToggleMs = 2500;
-constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 7000;
-constexpr unsigned long kTouchRearmReleaseStableMs = 600;
-constexpr bool kTouchControlEnabled = false;
+constexpr unsigned long kTouchPressDebounceMs = 60;
+constexpr unsigned long kTouchReleaseDebounceMs = 40;
+constexpr unsigned long kTouchRetriggerGuardMs = 350;
+constexpr unsigned long kTouchIgnoreAfterToggleMs = 250;
+constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 250;
+constexpr unsigned long kTouchRearmReleaseStableMs = 80;
+constexpr bool kTouchControlEnabled = true;
 
 bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
 }
 
-void write_led(bool active) {
-  analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? (active ? 255 : 0) : (active ? 0 : 255));
+const char* led_drive_name(LedDrive drive) {
+  switch (drive) {
+    case LedDrive::Red:
+      return "red";
+    case LedDrive::Green:
+      return "green";
+    case LedDrive::Off:
+    default:
+      return "off";
+  }
+}
+
+bool parse_led_drive(const char* value, LedDrive& drive) {
+  if (strcmp(value, "red") == 0 || strcmp(value, "high") == 0 || strcmp(value, "on") == 0) {
+    drive = LedDrive::Red;
+    return true;
+  }
+  if (strcmp(value, "green") == 0 || strcmp(value, "low") == 0) {
+    drive = LedDrive::Green;
+    return true;
+  }
+  if (strcmp(value, "off") == 0 || strcmp(value, "hiz") == 0 || strcmp(value, "hi-z") == 0) {
+    drive = LedDrive::Off;
+    return true;
+  }
+  return false;
+}
+
+void write_led_drive(LedDrive drive) {
+  led_drive = drive;
+  switch (drive) {
+    case LedDrive::Red:
+      pinMode(NodeConfig::kLedPin, OUTPUT);
+      digitalWrite(NodeConfig::kLedPin, HIGH);
+      break;
+    case LedDrive::Green:
+      pinMode(NodeConfig::kLedPin, OUTPUT);
+      digitalWrite(NodeConfig::kLedPin, LOW);
+      break;
+    case LedDrive::Off:
+    default:
+      digitalWrite(NodeConfig::kLedPin, LOW);
+      pinMode(NodeConfig::kLedPin, INPUT);
+      break;
+  }
 }
 
 void update_led() {
+  if (led_override_until_ms != 0 && static_cast<long>(millis() - led_override_until_ms) < 0) {
+    write_led_drive(led_override_drive);
+    return;
+  }
+  led_override_until_ms = 0;
+
   if (!mqtt_client.connected()) {
-    write_led(((millis() / 180) % 2) != 0);
+    write_led_drive(((millis() / 180) % 2) != 0 ? LedDrive::Red : LedDrive::Off);
     return;
   }
   if (touch_active) {
-    write_led(true);
+    write_led_drive(LedDrive::Green);
     return;
   }
-  write_led(remote_relay_on);
+  write_led_drive(remote_relay_on ? LedDrive::Red : LedDrive::Off);
 }
 
 bool publish_availability(const char* value) {
@@ -86,6 +143,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["wifiRssi"] = WiFi.RSSI();
   doc["touch"] = touch_active;
   doc["remoteRelay"] = remote_relay_on;
+  doc["led"] = led_drive_name(led_drive);
   if (detail && detail[0] != '\0') {
     doc["detail"] = detail;
   }
@@ -108,6 +166,7 @@ bool publish_telemetry_now() {
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["touch"] = touch_active;
   doc["remoteRelay"] = remote_relay_on;
+  doc["led"] = led_drive_name(led_drive);
 
   char payload[256];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
@@ -309,6 +368,22 @@ void handle_command(char* topic, const uint8_t* payload, unsigned int length) {
     telemetry_dirty = true;
     return;
   }
+  if (strcmp(action, "set_led") == 0) {
+    LedDrive drive = led_drive;
+    const char* value = doc["value"] | "";
+    if (!parse_led_drive(value, drive)) {
+      queue_state("bad_led_value", value);
+      telemetry_dirty = true;
+      return;
+    }
+    const unsigned long duration_ms = doc["durationMs"] | 5000UL;
+    led_override_drive = drive;
+    led_override_until_ms = duration_ms == 0 ? 0 : millis() + duration_ms;
+    write_led_drive(drive);
+    queue_state("led_test", led_drive_name(drive));
+    telemetry_dirty = true;
+    return;
+  }
 
   queue_state("unsupported_command", action);
 }
@@ -371,15 +446,14 @@ void setup_ota() {
 
 void init_gpio() {
   pinMode(NodeConfig::kTouchPin, INPUT);
-  pinMode(NodeConfig::kLedPin, OUTPUT);
-  analogWriteRange(255);
+  write_led_drive(LedDrive::Off);
   last_touch_raw = read_touch_active();
   touch_active = last_touch_raw;
   last_touch_raw_change_ms = millis();
   last_touch_toggle_ms = 0;
   touch_release_stable_since_ms = touch_active ? 0 : millis();
   touch_armed = !touch_active;
-  write_led(false);
+  update_led();
 }
 
 void status_log() {

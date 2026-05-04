@@ -51,12 +51,12 @@ bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 450;
-constexpr unsigned long kTouchReleaseDebounceMs = 200;
-constexpr unsigned long kTouchRetriggerGuardMs = 2500;
-constexpr unsigned long kTouchIgnoreAfterRelayMs = 2500;
-constexpr unsigned long kTouchRearmReleaseStableMs = 600;
-constexpr bool kTouchControlEnabled = false;
+constexpr unsigned long kTouchPressDebounceMs = 60;
+constexpr unsigned long kTouchReleaseDebounceMs = 40;
+constexpr unsigned long kTouchRetriggerGuardMs = 350;
+constexpr unsigned long kTouchIgnoreAfterRelayMs = 250;
+constexpr unsigned long kTouchRearmReleaseStableMs = 80;
+constexpr bool kTouchControlEnabled = true;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -201,13 +201,15 @@ void update_buzzer() {
 }
 
 void write_led() {
+  auto write_led_on = [](bool active) {
+    digitalWrite(NodeConfig::kLedPin, as_output_level(active, NodeConfig::kLedActiveHigh) ? HIGH : LOW);
+  };
+
   if (!mqtt_client.connected()) {
-    const int level = ((millis() / 180) % 2) ? 255 : 0;
-    analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
+    write_led_on(((millis() / 180) % 2) != 0);
     return;
   }
-  const int level = relay_on ? 255 : 0;
-  analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
+  write_led_on(relay_on);
 }
 
 void apply_output() {
