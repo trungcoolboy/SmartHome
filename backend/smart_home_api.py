@@ -30,6 +30,8 @@ ROOM_NODE_CONFIGS = [
     ("/api/node/living-room-02", "living-room-node-02"),
     ("/api/node/bedroom-2-01", "bedroom-2-node-01"),
     ("/api/node/bedroom-2-02", "bedroom-2-node-02"),
+    ("/api/node/bathroom-1-01", "bathroom-1-node-01"),
+    ("/api/node/bathroom-1-02", "bathroom-1-node-02"),
 ]
 TV_STALE_AFTER_SECONDS = 20.0
 
@@ -77,6 +79,7 @@ class RoomNodeState:
     free_heap: int | None = None
     relays: dict[str, bool] = field(default_factory=dict)
     touches: dict[str, bool] = field(default_factory=dict)
+    led_modes: dict[str, str] = field(default_factory=dict)
     led_mode: str | None = None
     remote_relay: bool | None = None
     log: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=100))
@@ -98,6 +101,7 @@ class RoomNodeState:
                 "freeHeap": self.free_heap,
                 "relays": dict(self.relays),
                 "touches": dict(self.touches),
+                "ledModes": dict(self.led_modes),
                 "ledMode": self.led_mode,
                 "remoteRelay": self.remote_relay,
                 "uptimeSeconds": round(time.time() - self.boot_time, 3),
@@ -208,6 +212,18 @@ class RoomNodeRuntime:
                         self.state.relays[key] = bool(item.get("on"))
                         if "touchActive" in item:
                             self.state.touches[key] = bool(item.get("touchActive"))
+                        if "ledMode" in item:
+                            self.state.led_modes[key] = str(item.get("ledMode"))
+                    for item in data.get("channels", []):
+                        key = str(item.get("key", ""))
+                        if not key:
+                            continue
+                        if "relayOn" in item:
+                            self.state.relays[key] = bool(item.get("relayOn"))
+                        if "touchActive" in item:
+                            self.state.touches[key] = bool(item.get("touchActive"))
+                        if "ledMode" in item:
+                            self.state.led_modes[key] = str(item.get("ledMode"))
         except Exception as exc:
             with self.state.lock:
                 self.state.last_error = str(exc)

@@ -256,21 +256,54 @@ export const pageContent = {
   },
   "bathroom-1": {
     eyebrow: "Bathroom 1",
-    title: "Bathroom controls focused on light, exhaust and moisture handling.",
+    title: "Bathroom controls for lights, local relays and hot water.",
     description:
-      "This room should make humidity and exhaust logic obvious so fast manual overrides do not break basic ventilation automation.",
+      "Node 01 handles the wall touch panel and two local relays. Node 02 drives the hot-water relay, status LED, touch input and buzzer.",
+    switchPanel: {
+      title: "Switch",
+    },
+    roomNode: {
+      title: "Bathroom 1 Node 01",
+      apiPath: "/api/node/bathroom-1-01",
+      relays: [
+        { key: "relay1", label: "Relay 1" },
+        { key: "relay2", label: "Relay 2" },
+      ],
+      touches: [
+        { key: "relay1", label: "Touch 1" },
+        { key: "relay2", label: "Touch 2" },
+        { key: "touch3", label: "Remote Touch" },
+      ],
+      ledModes: [
+        { key: "auto", label: "Auto" },
+        { key: "on", label: "On" },
+        { key: "off", label: "Off" },
+      ],
+    },
+    roomNodeSecondary: {
+      title: "Bathroom 1 Node 02",
+      apiPath: "/api/node/bathroom-1-02",
+      relays: [{ key: "relay", label: "Hot Water Relay" }],
+      touches: [{ key: "touch", label: "Local Touch" }],
+      ledModes: [
+        { key: "auto", label: "Auto" },
+        { key: "on", label: "On" },
+        { key: "off", label: "Off" },
+      ],
+      ledModeScopedByRelay: false,
+    },
     highlights: [
       {
         title: "Devices",
-        items: ["Mirror light", "Ceiling light", "Exhaust fan", "Humidity sensor"],
+        items: ["Relay 1", "Relay 2", "Remote hot-water touch", "Hot-water relay and buzzer"],
       },
       {
-        title: "Automation",
-        items: ["Auto-fan on high humidity", "Delayed fan off", "Night light trigger"],
+        title: "Remote Link",
+        items: ["Touch 3 on node 1 toggles node 2", "LED 3 follows hot-water relay", "Dashboard can control node 2 directly"],
       },
       {
         title: "Realtime Layer",
-        items: ["Humidity trend", "Exhaust runtime", "Sensor heartbeat"],
+        items: ["Node 1 touch states", "Node 2 relay state", "MQTT availability and RSSI"],
       },
     ],
   },
