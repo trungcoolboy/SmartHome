@@ -50,12 +50,12 @@ bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 60;
-constexpr unsigned long kTouchReleaseDebounceMs = 40;
-constexpr unsigned long kTouchRetriggerGuardMs = 350;
-constexpr unsigned long kTouchIgnoreAfterToggleMs = 250;
-constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 250;
-constexpr unsigned long kTouchRearmReleaseStableMs = 80;
+constexpr unsigned long kTouchPressDebounceMs = 220;
+constexpr unsigned long kTouchReleaseDebounceMs = 180;
+constexpr unsigned long kTouchRetriggerGuardMs = 800;
+constexpr unsigned long kTouchIgnoreAfterToggleMs = 600;
+constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 600;
+constexpr unsigned long kTouchRearmReleaseStableMs = 220;
 constexpr bool kTouchControlEnabled = true;
 
 bool read_touch_active() {
@@ -332,11 +332,6 @@ void handle_touch() {
   }
 
   if (now_ms < touch_ignore_until_ms) {
-    if (touch_active != raw) {
-      touch_active = raw;
-      update_led();
-      telemetry_dirty = true;
-    }
     if (!raw) {
       if (touch_release_stable_since_ms == 0) {
         touch_release_stable_since_ms = now_ms;
