@@ -22,8 +22,8 @@ constexpr char kTelemetryTopic[] = "smarthome/bedroom-2-node-02/telemetry";
 constexpr char kCommandTopic[] = "smarthome/bedroom-2-node-02/command";
 constexpr char kStateTopic[] = "smarthome/bedroom-2-node-02/state";
 
-constexpr uint8_t kTouchPin = 4;
-constexpr uint8_t kLedPin = 14;
+constexpr uint8_t kTouchPin = 14;
+constexpr uint8_t kLedPin = 4;
 
 constexpr bool kTouchActiveHigh = true;
 constexpr bool kLedActiveHigh = true;

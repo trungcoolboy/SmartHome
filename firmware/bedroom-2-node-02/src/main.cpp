@@ -178,7 +178,7 @@ void update_led() {
     return;
   }
   if (touch_active) {
-    write_led_drive(LedDrive::Green);
+    write_led_drive(LedDrive::Red);
     return;
   }
   write_led_drive(remote_relay_on ? LedDrive::Red : LedDrive::Off);
@@ -202,6 +202,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["uptimeMs"] = millis();
   doc["wifiRssi"] = WiFi.RSSI();
   doc["touch"] = touch_active;
+  doc["touchPin"] = NodeConfig::kTouchPin;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
   doc["ledPin"] = NodeConfig::kLedPin;
@@ -230,6 +231,7 @@ bool publish_telemetry_now() {
   doc["ip"] = WiFi.localIP().toString();
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["touch"] = touch_active;
+  doc["touchPin"] = NodeConfig::kTouchPin;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
   doc["ledPin"] = NodeConfig::kLedPin;
