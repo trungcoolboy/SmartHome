@@ -56,7 +56,7 @@ constexpr unsigned long kTouchReleaseDebounceMs = 40;
 constexpr unsigned long kTouchRetriggerGuardMs = 350;
 constexpr unsigned long kTouchIgnoreAfterRelayMs = 250;
 constexpr unsigned long kTouchRearmReleaseStableMs = 80;
-constexpr bool kTouchControlEnabled = true;
+constexpr bool kTouchControlEnabled = false;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
