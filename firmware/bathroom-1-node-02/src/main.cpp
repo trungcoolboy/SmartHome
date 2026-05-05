@@ -28,7 +28,9 @@ enum class LedMode : uint8_t {
 bool relay_on = false;
 bool touch_active = false;
 bool last_touch_raw = false;
+bool buzzer_active = false;
 LedMode led_mode = LedMode::Auto;
+unsigned long buzzer_until_ms = 0;
 unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
 unsigned long last_wifi_begin_ms = 0;
@@ -47,9 +49,9 @@ bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 250;
-constexpr unsigned long kTouchReleaseDebounceMs = 120;
-constexpr unsigned long kTouchRetriggerGuardMs = 2500;
+constexpr unsigned long kTouchPressDebounceMs = 60;
+constexpr unsigned long kTouchReleaseDebounceMs = 40;
+constexpr unsigned long kTouchRetriggerGuardMs = 350;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -173,6 +175,26 @@ bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
 }
 
+void write_buzzer(bool active) {
+  digitalWrite(NodeConfig::kBuzzerPin, as_output_level(active, NodeConfig::kBuzzerActiveHigh) ? HIGH : LOW);
+}
+
+void pulse_buzzer(unsigned long duration_ms) {
+  buzzer_active = true;
+  buzzer_until_ms = millis() + duration_ms;
+  write_buzzer(true);
+}
+
+void update_buzzer() {
+  if (!buzzer_active) {
+    return;
+  }
+  if (static_cast<long>(millis() - buzzer_until_ms) >= 0) {
+    buzzer_active = false;
+    write_buzzer(false);
+  }
+}
+
 void write_led() {
   if (!mqtt_client.connected()) {
     const int level = ((millis() / 180) % 2) ? 255 : 0;
@@ -210,7 +232,12 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   }
   doc["relay"] = relay_on;
   doc["touch"] = touch_active;
+  doc["buzzer"] = buzzer_active;
   doc["ledMode"] = led_mode_name(led_mode);
+  doc["relayPin"] = NodeConfig::kRelayPin;
+  doc["ledPin"] = NodeConfig::kLedPin;
+  doc["touchPin"] = NodeConfig::kTouchPin;
+  doc["buzzerPin"] = NodeConfig::kBuzzerPin;
 
   char payload[256];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
@@ -230,7 +257,12 @@ bool publish_telemetry_now() {
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["relay"] = relay_on;
   doc["touch"] = touch_active;
+  doc["buzzer"] = buzzer_active;
   doc["ledMode"] = led_mode_name(led_mode);
+  doc["relayPin"] = NodeConfig::kRelayPin;
+  doc["ledPin"] = NodeConfig::kLedPin;
+  doc["touchPin"] = NodeConfig::kTouchPin;
+  doc["buzzerPin"] = NodeConfig::kBuzzerPin;
 
   char payload[256];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
@@ -263,9 +295,13 @@ void flush_pending_mqtt() {
 }
 
 void set_relay(bool on, const char* event) {
+  const bool changed = relay_on != on;
   relay_on = on;
   last_local_action_ms = millis();
   apply_output();
+  if (changed) {
+    pulse_buzzer(on ? 120UL : 80UL);
+  }
   telemetry_dirty = true;
   queue_state(event, on ? "on" : "off");
 }
@@ -315,6 +351,14 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
       return;
     }
     set_led_mode(next_mode, "led_mode_updated");
+    return;
+  }
+
+  if (strcmp(action, "buzz") == 0) {
+    const unsigned long duration_ms = doc["durationMs"] | 120UL;
+    pulse_buzzer(duration_ms);
+    telemetry_dirty = true;
+    queue_state("buzz");
     return;
   }
 
@@ -411,6 +455,8 @@ void init_gpio() {
   pinMode(NodeConfig::kRelayPin, OUTPUT);
   pinMode(NodeConfig::kLedPin, OUTPUT);
   pinMode(NodeConfig::kTouchPin, INPUT);
+  pinMode(NodeConfig::kBuzzerPin, OUTPUT);
+  write_buzzer(false);
   apply_output();
   last_touch_raw = read_touch_active();
   touch_active = last_touch_raw;
@@ -479,6 +525,7 @@ void loop() {
   ArduinoOTA.handle();
   mqtt_client.loop();
   flush_pending_mqtt();
+  update_buzzer();
   write_led();
 
   const unsigned long now = millis();

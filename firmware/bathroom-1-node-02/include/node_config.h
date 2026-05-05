@@ -9,7 +9,7 @@ constexpr char kNodeId[] = "bathroom-1-node-02";
 constexpr char kWifiSsid[] = "Ludwig van Beethoven";
 constexpr char kWifiPassword[] = "Anhtrung123";
 
-constexpr char kMqttHost[] = "192.168.1.253";
+constexpr char kMqttHost[] = "192.168.1.182";
 constexpr uint16_t kMqttPort = 1883;
 constexpr char kMqttUsername[] = "";
 constexpr char kMqttPassword[] = "";
@@ -22,14 +22,15 @@ constexpr char kTelemetryTopic[] = "smarthome/bathroom-1-node-02/telemetry";
 constexpr char kCommandTopic[] = "smarthome/bathroom-1-node-02/command";
 constexpr char kStateTopic[] = "smarthome/bathroom-1-node-02/state";
 
-// Default scaffold pins. Replace after hardware mapping is known.
-constexpr uint8_t kRelayPin = 16;
+constexpr uint8_t kRelayPin = 5;
 constexpr uint8_t kLedPin = 4;
-constexpr uint8_t kTouchPin = 5;
+constexpr uint8_t kTouchPin = 13;
+constexpr uint8_t kBuzzerPin = 14;
 
 constexpr bool kRelayActiveHigh = true;
 constexpr bool kLedActiveHigh = true;
 constexpr bool kTouchActiveHigh = true;
+constexpr bool kBuzzerActiveHigh = true;
 
 constexpr uint32_t kTelemetryIntervalMs = 5000;
 constexpr uint32_t kTouchDebounceMs = 80;
