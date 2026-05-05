@@ -532,7 +532,7 @@ void setup_ota() {
 }
 
 void init_gpio() {
-  pinMode(NodeConfig::kTouchPin, INPUT);
+  pinMode(NodeConfig::kTouchPin, INPUT_PULLUP);
   write_led_drive(LedDrive::Off);
   last_touch_raw = read_touch_active();
   touch_active = last_touch_raw;
