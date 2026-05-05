@@ -24,7 +24,7 @@ constexpr char kStateTopic[] = "smarthome/bedroom-2-node-01/state";
 
 constexpr uint8_t kRelayPin = 4;
 constexpr uint8_t kLedPin = 12;
-constexpr uint8_t kTouchPin = 16;
+constexpr uint8_t kTouchPin = 13;
 constexpr uint8_t kBuzzerPin = 5;
 
 constexpr bool kRelayActiveHigh = true;
