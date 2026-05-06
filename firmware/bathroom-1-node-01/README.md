@@ -30,4 +30,18 @@ Supported MQTT commands:
 - `{"action":"set_led_mode","mode":"pulse"}`
 - `{"action":"set_led_mode","mode":"candle"}`
 
-Default pin map is in `include/node_config.h`.
+Current pin map:
+
+```text
+Relay 1: GPIO5, active LOW
+Relay 2: GPIO12, active LOW
+Touch 1: GPIO4, active LOW, internal pullup
+Touch 2: GPIO13, active LOW, internal pullup
+Touch 3: GPIO14, active LOW, internal pullup
+LED 1  : GPIO15
+LED 2  : GPIO2
+LED 3  : GPIO0
+```
+
+`GPIO0`, `GPIO2`, and `GPIO15` are ESP8266 boot strap pins. Do not add
+external circuits that force them to the wrong boot level.
