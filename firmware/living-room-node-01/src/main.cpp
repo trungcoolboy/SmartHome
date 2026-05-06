@@ -173,7 +173,7 @@ void write_led() {
     analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
     return;
   }
-  const int level = relay_on ? 255 : 0;
+  const int level = led_mode == LedMode::Auto ? (relay_on ? 255 : 0) : current_led_level(true);
   analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
 }
 
