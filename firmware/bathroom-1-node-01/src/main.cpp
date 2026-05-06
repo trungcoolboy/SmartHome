@@ -151,9 +151,9 @@ bool parse_led_mode(const char* value, LedMode& mode) {
 const char* led_drive_name(LedDrive drive) {
   switch (drive) {
     case LedDrive::Red:
-      return "red";
+      return "on";
     case LedDrive::Green:
-      return "green";
+      return "on";
     case LedDrive::Off:
     default:
       return "off";
@@ -181,37 +181,84 @@ bool read_touch_active(uint8_t pin) {
   return NodeConfig::kTouchActiveHigh ? (raw == HIGH) : (raw == LOW);
 }
 
-void write_led_drive(uint8_t pin, LedDrive drive) {
-  if (drive == LedDrive::Off) {
-    pinMode(pin, INPUT);
+int led_level_for_mode(LedMode mode, bool auto_on) {
+  const unsigned long now_ms = millis();
+  switch (mode) {
+    case LedMode::On:
+      return 255;
+    case LedMode::Off:
+      return 0;
+    case LedMode::Breathe:
+    case LedMode::Pulse: {
+      const unsigned long period = mode == LedMode::Pulse ? 1800UL : NodeConfig::kLedBreathPeriodMs;
+      const unsigned long phase = now_ms % period;
+      const float half_period = period / 2.0f;
+      float ratio = phase <= half_period ? (phase / half_period) : ((period - phase) / half_period);
+      ratio = mode == LedMode::Pulse ? (0.04f + (0.96f * ratio)) : (0.12f + (0.88f * ratio));
+      return static_cast<int>(ratio * 255.0f);
+    }
+    case LedMode::BlinkSlow:
+      return ((now_ms / 700UL) % 2UL) ? 255 : 0;
+    case LedMode::BlinkFast:
+      return ((now_ms / 180UL) % 2UL) ? 255 : 0;
+    case LedMode::DoubleBlink: {
+      const unsigned long phase = now_ms % 1400UL;
+      return (phase < 120UL || (phase >= 240UL && phase < 360UL)) ? 255 : 0;
+    }
+    case LedMode::Heartbeat: {
+      const unsigned long phase = now_ms % 1500UL;
+      return (phase < 90UL || (phase >= 140UL && phase < 230UL)) ? 255 : 0;
+    }
+    case LedMode::Candle: {
+      const unsigned long phase = now_ms % 997UL;
+      const int base = 150 + static_cast<int>((phase * 73UL) % 70UL);
+      const int dip = (phase % 173UL < 20UL) ? 60 : 0;
+      const int level = base - dip;
+      return level < 0 ? 0 : (level > 255 ? 255 : level);
+    }
+    case LedMode::Auto:
+    default:
+      return auto_on ? 255 : 0;
+  }
+}
+
+void write_led_level(uint8_t pin, int level) {
+  const int constrained_level = level < 0 ? 0 : (level > 255 ? 255 : level);
+  pinMode(pin, OUTPUT);
+  if (pin == 16) {
+    const bool on = constrained_level >= 128;
+    digitalWrite(pin, NodeConfig::kLedActiveHigh ? (on ? HIGH : LOW) : (on ? LOW : HIGH));
     return;
   }
+  analogWrite(pin, NodeConfig::kLedActiveHigh ? constrained_level : (255 - constrained_level));
+}
 
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, drive == LedDrive::Red ? HIGH : LOW);
+void write_led_drive(uint8_t pin, LedDrive drive) {
+  write_led_level(pin, drive == LedDrive::Off ? 0 : 255);
 }
 
 void update_leds() {
   if (!mqtt_client.connected()) {
-    const LedDrive blink_drive = ((millis() / 360UL) % 2UL) == 0 ? LedDrive::Red : LedDrive::Green;
+    const bool blink_on = ((millis() / 360UL) % 2UL) == 0;
     for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
       auto& channel = channels[i];
-      channel.led_drive = blink_drive;
-      write_led_drive(channel.led_pin, channel.led_drive);
+      channel.led_drive = blink_on ? LedDrive::Red : LedDrive::Off;
+      write_led_level(channel.led_pin, blink_on ? 255 : 0);
     }
     return;
   }
 
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
+    bool auto_on = false;
     if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
-      channel.led_drive = remote_node02_relay_on ? LedDrive::Red : LedDrive::Green;
+      auto_on = remote_node02_relay_on;
     } else if (channel.has_relay) {
-      channel.led_drive = channel.relay_on ? LedDrive::Red : LedDrive::Green;
-    } else {
-      channel.led_drive = LedDrive::Green;
+      auto_on = channel.relay_on;
     }
-    write_led_drive(channel.led_pin, channel.led_drive);
+    const int level = led_level_for_mode(channel.led_mode, auto_on);
+    channel.led_drive = level > 0 ? LedDrive::Red : LedDrive::Off;
+    write_led_level(channel.led_pin, level);
   }
 }
 
@@ -369,10 +416,11 @@ void set_channel_led_mode(ChannelState& channel, LedMode mode, const char* event
   channel.led_mode = mode;
   update_leds();
   telemetry_dirty = true;
-  queue_state(event, channel.key, led_drive_name(channel.led_drive));
+  queue_state(event, channel.key, led_mode_name(channel.led_mode));
 }
 
 void set_channel_led_drive(ChannelState& channel, LedDrive drive, const char* event) {
+  channel.led_mode = drive == LedDrive::Off ? LedMode::Off : LedMode::On;
   update_leds();
   telemetry_dirty = true;
   queue_state(event, channel.key, led_drive_name(channel.led_drive));
@@ -613,7 +661,7 @@ void init_gpio() {
       pinMode(channel.relay_pin, OUTPUT);
     }
     write_led_drive(channel.led_pin, channel.led_drive);
-    pinMode(channel.touch_pin, INPUT);
+    pinMode(channel.touch_pin, NodeConfig::kTouchActiveHigh ? INPUT : INPUT_PULLUP);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
     channel.touch_active = channel.last_touch_raw;
     channel.last_touch_raw_change_ms = millis();

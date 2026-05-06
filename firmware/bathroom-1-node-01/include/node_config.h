@@ -33,7 +33,7 @@ constexpr uint8_t kLed3Pin = 0;
 
 constexpr bool kRelay1ActiveHigh = false;
 constexpr bool kRelay2ActiveHigh = false;
-constexpr bool kTouchActiveHigh = true;
+constexpr bool kTouchActiveHigh = false;
 constexpr bool kLedActiveHigh = true;
 
 constexpr long kTimezoneOffsetSeconds = 7 * 3600;
