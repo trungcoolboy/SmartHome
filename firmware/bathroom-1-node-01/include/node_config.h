@@ -24,11 +24,11 @@ constexpr char kStateTopic[] = "smarthome/bathroom-1-node-01/state";
 
 constexpr uint8_t kRelay1Pin = 5;
 constexpr uint8_t kRelay2Pin = 12;
-constexpr uint8_t kTouch1Pin = 4;
-constexpr uint8_t kTouch2Pin = 13;
+constexpr uint8_t kTouch1Pin = 13;
+constexpr uint8_t kTouch2Pin = 4;
 constexpr uint8_t kTouch3Pin = 14;
-constexpr uint8_t kLed1Pin = 15;
-constexpr uint8_t kLed2Pin = 0;
+constexpr uint8_t kLed1Pin = 0;
+constexpr uint8_t kLed2Pin = 15;
 constexpr uint8_t kLed3Pin = 16;
 
 constexpr bool kRelay1ActiveHigh = false;

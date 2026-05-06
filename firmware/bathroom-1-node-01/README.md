@@ -35,11 +35,11 @@ Current pin map:
 ```text
 Relay 1: GPIO5, active LOW
 Relay 2: GPIO12, active LOW
-Touch 1: GPIO4, active LOW, internal pullup
-Touch 2: GPIO13, active LOW, internal pullup
+Touch 1: GPIO13, active LOW, internal pullup
+Touch 2: GPIO4, active LOW, internal pullup
 Touch 3: GPIO14, active LOW, internal pullup
-LED 1  : GPIO15
-LED 2  : GPIO0
+LED 1  : GPIO0
+LED 2  : GPIO15
 LED 3  : GPIO16
 ```
 
