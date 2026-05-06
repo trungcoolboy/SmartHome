@@ -1,0 +1,17 @@
+[Unit]
+Description=Smart Home Telegram Bridge
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/trungcoolboy/SmartHome/backend
+EnvironmentFile=-/etc/smart-home-telegram.env
+ExecStart=/usr/bin/python3 /home/trungcoolboy/SmartHome/backend/telegram_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

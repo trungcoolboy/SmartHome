@@ -140,6 +140,50 @@ STM32 #01 qua gateway:
 curl http://127.0.0.1:8090/api/stm32/01/status
 ```
 
+## Telegram bridge
+
+Bridge Telegram dung bot rieng de nhan thong bao MQTT va gui lenh xuong node.
+Repo da co cau hinh that cho bot tai:
+
+```bash
+/home/trungcoolboy/SmartHome/backend/systemd/smart-home-telegram.env
+```
+
+File mau khong chua token nam o:
+
+```bash
+/home/trungcoolboy/SmartHome/backend/systemd/smart-home-telegram.env.example
+```
+
+Cai service:
+
+```bash
+sudo cp /home/trungcoolboy/SmartHome/backend/systemd/smart-home-telegram.service /etc/systemd/system/
+sudo install -m 600 -o root -g root /home/trungcoolboy/SmartHome/backend/systemd/smart-home-telegram.env /etc/smart-home-telegram.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now smart-home-telegram.service
+```
+
+Kiem tra:
+
+```bash
+systemctl status smart-home-telegram.service --no-pager
+journalctl -u smart-home-telegram.service -n 80 --no-pager
+```
+
+Lenh Telegram:
+
+```text
+/status
+/nodes
+/on bath1-1 relay1
+/off bath1-1 relay2
+/toggle hotwater
+/buzz hotwater 120
+/led bath1-1 touch3 red
+/pingnode bath1-2
+```
+
 ## Du lieu hien tai tu firmware test
 
 Firmware `STM32 #01` dang gui:
