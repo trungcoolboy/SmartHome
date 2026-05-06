@@ -50,12 +50,12 @@ bool touch_armed = true;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 220;
-constexpr unsigned long kTouchReleaseDebounceMs = 180;
-constexpr unsigned long kTouchRetriggerGuardMs = 800;
-constexpr unsigned long kTouchIgnoreAfterToggleMs = 600;
-constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 600;
-constexpr unsigned long kTouchRearmReleaseStableMs = 220;
+constexpr unsigned long kTouchPressDebounceMs = 650;
+constexpr unsigned long kTouchReleaseDebounceMs = 450;
+constexpr unsigned long kTouchRetriggerGuardMs = 3000;
+constexpr unsigned long kTouchIgnoreAfterToggleMs = 1800;
+constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 1200;
+constexpr unsigned long kTouchRearmReleaseStableMs = 900;
 constexpr bool kTouchControlEnabled = true;
 
 bool read_touch_active() {
