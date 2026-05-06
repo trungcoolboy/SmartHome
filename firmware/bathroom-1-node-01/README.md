@@ -39,9 +39,10 @@ Touch 1: GPIO4, active LOW, internal pullup
 Touch 2: GPIO13, active LOW, internal pullup
 Touch 3: GPIO14, active LOW, internal pullup
 LED 1  : GPIO15
-LED 2  : GPIO2
-LED 3  : GPIO0
+LED 2  : GPIO0
+LED 3  : GPIO16
 ```
 
-`GPIO0`, `GPIO2`, and `GPIO15` are ESP8266 boot strap pins. Do not add
-external circuits that force them to the wrong boot level.
+`GPIO0` and `GPIO15` are ESP8266 boot strap pins. Do not add external
+circuits that force them to the wrong boot level. GPIO16 is used for LED 3
+because GPIO2 blocked boot with the current LED wiring.

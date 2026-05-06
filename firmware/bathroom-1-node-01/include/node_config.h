@@ -28,8 +28,8 @@ constexpr uint8_t kTouch1Pin = 4;
 constexpr uint8_t kTouch2Pin = 13;
 constexpr uint8_t kTouch3Pin = 14;
 constexpr uint8_t kLed1Pin = 15;
-constexpr uint8_t kLed2Pin = 2;
-constexpr uint8_t kLed3Pin = 0;
+constexpr uint8_t kLed2Pin = 0;
+constexpr uint8_t kLed3Pin = 16;
 
 constexpr bool kRelay1ActiveHigh = false;
 constexpr bool kRelay2ActiveHigh = false;
