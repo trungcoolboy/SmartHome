@@ -40,12 +40,13 @@ struct ChannelState {
   bool relay_on;
   bool touch_active;
   bool last_touch_raw;
+  unsigned long last_touch_raw_change_ms;
   LedMode led_mode;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, LedMode::Auto},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, LedMode::Auto},
 };
 
 unsigned long last_telemetry_ms = 0;
@@ -510,19 +511,28 @@ void ensure_time() {
 }
 
 void poll_touch_inputs() {
+  const unsigned long now = millis();
   const bool raw_touch_1 = read_touch_active(channels[0].touch_pin);
   const bool raw_touch_2 = read_touch_active(channels[1].touch_pin);
 
   for (size_t index = 0; index < (sizeof(channels) / sizeof(channels[0])); ++index) {
     auto& channel = channels[index];
     const bool raw = index == 0 ? raw_touch_1 : raw_touch_2;
-    if (raw == channel.touch_active) {
+    if (raw != channel.last_touch_raw) {
       channel.last_touch_raw = raw;
+      channel.last_touch_raw_change_ms = now;
+      continue;
+    }
+
+    if (raw == channel.touch_active) {
+      continue;
+    }
+
+    if ((now - channel.last_touch_raw_change_ms) < NodeConfig::kTouchDebounceMs) {
       continue;
     }
 
     const bool was_active = channel.touch_active;
-    channel.last_touch_raw = raw;
     channel.touch_active = raw;
     telemetry_dirty = true;
     if (!was_active && channel.touch_active) {
@@ -538,6 +548,7 @@ void init_gpio() {
     pinMode(channel.touch_pin, INPUT);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
     channel.touch_active = channel.last_touch_raw;
+    channel.last_touch_raw_change_ms = millis();
     apply_channel_output(channel);
   }
 }

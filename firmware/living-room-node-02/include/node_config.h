@@ -42,4 +42,5 @@ constexpr uint8_t kLedBreathEndHour = 6;
 constexpr uint16_t kLedBreathPeriodMs = 4200;
 
 constexpr uint32_t kTelemetryIntervalMs = 5000;
+constexpr uint32_t kTouchDebounceMs = 80;
 }  // namespace

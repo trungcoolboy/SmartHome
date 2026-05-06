@@ -28,6 +28,7 @@ enum class LedMode : uint8_t {
 bool relay_on = false;
 bool touch_active = false;
 bool last_touch_raw = false;
+unsigned long last_touch_raw_change_ms = 0;
 LedMode led_mode = LedMode::Auto;
 unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
@@ -408,17 +409,27 @@ void init_gpio() {
   apply_output();
   last_touch_raw = read_touch_active();
   touch_active = last_touch_raw;
+  last_touch_raw_change_ms = millis();
 }
 
 void poll_touch() {
+  const unsigned long now = millis();
   const bool raw = read_touch_active();
-  if (raw == touch_active) {
+  if (raw != last_touch_raw) {
     last_touch_raw = raw;
+    last_touch_raw_change_ms = now;
+    return;
+  }
+
+  if (raw == touch_active) {
+    return;
+  }
+
+  if ((now - last_touch_raw_change_ms) < NodeConfig::kTouchDebounceMs) {
     return;
   }
 
   const bool was_active = touch_active;
-  last_touch_raw = raw;
   touch_active = raw;
   telemetry_dirty = true;
   if (!was_active && touch_active) {

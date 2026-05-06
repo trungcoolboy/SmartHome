@@ -627,6 +627,7 @@ void setup_ota() {
 }
 
 void poll_touch_inputs() {
+  const unsigned long now = millis();
   const bool raw_touch_1 = read_touch_active(channels[0].touch_pin);
   const bool raw_touch_2 = read_touch_active(channels[1].touch_pin);
   const bool raw_touch_3 = read_touch_active(channels[2].touch_pin);
@@ -634,13 +635,21 @@ void poll_touch_inputs() {
   for (size_t index = 0; index < (sizeof(channels) / sizeof(channels[0])); ++index) {
     auto& channel = channels[index];
     const bool raw = index == 0 ? raw_touch_1 : (index == 1 ? raw_touch_2 : raw_touch_3);
-    if (raw == channel.touch_active) {
+    if (raw != channel.last_touch_raw) {
       channel.last_touch_raw = raw;
+      channel.last_touch_raw_change_ms = now;
+      continue;
+    }
+
+    if (raw == channel.touch_active) {
+      continue;
+    }
+
+    if ((now - channel.last_touch_raw_change_ms) < NodeConfig::kTouchDebounceMs) {
       continue;
     }
 
     const bool was_active = channel.touch_active;
-    channel.last_touch_raw = raw;
     channel.touch_active = raw;
     telemetry_dirty = true;
 
