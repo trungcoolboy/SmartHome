@@ -56,7 +56,7 @@ constexpr unsigned long kTouchReleaseDebounceMs = 40;
 constexpr unsigned long kTouchRetriggerGuardMs = 350;
 constexpr unsigned long kTouchIgnoreAfterRelayMs = 250;
 constexpr unsigned long kTouchRearmReleaseStableMs = 80;
-constexpr bool kTouchControlEnabled = false;
+constexpr bool kTouchControlEnabled = true;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -454,7 +454,7 @@ void init_gpio() {
   pinMode(NodeConfig::kRelayPin, OUTPUT);
   pinMode(NodeConfig::kLedPin, OUTPUT);
   pinMode(NodeConfig::kBuzzerPin, OUTPUT);
-  pinMode(NodeConfig::kTouchPin, INPUT);
+  pinMode(NodeConfig::kTouchPin, NodeConfig::kTouchActiveHigh ? INPUT : INPUT_PULLUP);
   write_buzzer(false);
   apply_output();
   last_touch_raw = read_touch_active();

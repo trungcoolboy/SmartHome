@@ -29,7 +29,7 @@ constexpr uint8_t kBuzzerPin = 5;
 
 constexpr bool kRelayActiveHigh = true;
 constexpr bool kLedActiveHigh = true;
-constexpr bool kTouchActiveHigh = true;
+constexpr bool kTouchActiveHigh = false;
 constexpr bool kBuzzerActiveHigh = true;
 
 constexpr uint32_t kTelemetryIntervalMs = 5000;
