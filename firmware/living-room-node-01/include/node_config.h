@@ -23,12 +23,12 @@ constexpr char kCommandTopic[] = "smarthome/living-room-node-01/command";
 constexpr char kStateTopic[] = "smarthome/living-room-node-01/state";
 
 constexpr uint8_t kRelayPin = 5;
-constexpr uint8_t kLedPin = 4;
-constexpr uint8_t kTouchPin = 16;
+constexpr uint8_t kLedPin = 12;
+constexpr uint8_t kTouchPin = 13;
 
 constexpr bool kRelayActiveHigh = true;
 constexpr bool kLedActiveHigh = true;
-constexpr bool kTouchActiveHigh = true;
+constexpr bool kTouchActiveHigh = false;
 
 constexpr uint32_t kTelemetryIntervalMs = 5000;
 constexpr uint32_t kTouchDebounceMs = 80;

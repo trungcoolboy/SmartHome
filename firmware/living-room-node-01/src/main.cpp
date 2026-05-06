@@ -404,7 +404,7 @@ void init_gpio() {
   analogWriteRange(255);
   pinMode(NodeConfig::kRelayPin, OUTPUT);
   pinMode(NodeConfig::kLedPin, OUTPUT);
-  pinMode(NodeConfig::kTouchPin, INPUT);
+  pinMode(NodeConfig::kTouchPin, NodeConfig::kTouchActiveHigh ? INPUT : INPUT_PULLUP);
   apply_output();
   last_touch_raw = read_touch_active();
   touch_active = last_touch_raw;
