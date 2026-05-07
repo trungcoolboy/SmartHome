@@ -133,10 +133,13 @@ Database log:
 ```bash
 curl "http://127.0.0.1:8090/api/history?limit=20"
 curl "http://127.0.0.1:8090/api/history?event_type=relay_change&limit=20"
+curl "http://127.0.0.1:8090/api/history?event_type=temperature_sample&limit=20"
+curl -o temperature.csv "http://127.0.0.1:8090/api/history/export?event_type=temperature_sample&format=csv&limit=86400"
 curl "http://127.0.0.1:8090/api/history/stats"
 ```
 
-Database chi ghi cac event relay/control on/off co y nghia, khong ghi telemetry/snapshot dinh ky.
+Database chi ghi cac event relay/control on/off co y nghia va mau nhiet do STM32 moi 1s, khong ghi telemetry/snapshot dinh ky.
+Dashboard co trang Logs de xem preview va tai CSV/JSON.
 
 File SQLite nam tai:
 

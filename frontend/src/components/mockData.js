@@ -6,6 +6,7 @@ export const navItems = [
   { id: "bathroom-1", label: "Bathroom 1" },
   { id: "bathroom-2", label: "Bathroom 2" },
   { id: "aquarium", label: "Aquarium" },
+  { id: "logs", label: "Logs" },
   { id: "alerts", label: "Alerts" },
   { id: "settings", label: "Settings" },
 ];

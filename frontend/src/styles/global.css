@@ -111,6 +111,106 @@ button {
   box-shadow: var(--shadow);
 }
 
+.log-header-card,
+.log-control-card,
+.log-table-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  backdrop-filter: blur(18px);
+  box-shadow: var(--shadow);
+}
+
+.log-header-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 28px;
+}
+
+.log-header-card h2 {
+  margin: 0;
+  font-size: clamp(1.7rem, 3vw, 2.8rem);
+}
+
+.log-header-card p {
+  max-width: 62ch;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.log-stat-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 12px;
+  min-width: 300px;
+}
+
+.log-stat-strip div {
+  padding: 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.log-stat-strip span,
+.log-filter-grid label span {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.log-stat-strip strong {
+  display: block;
+  color: var(--accent-strong);
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-control-card,
+.log-table-card {
+  padding: 22px;
+}
+
+.log-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.7fr) minmax(160px, 0.7fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.log-filter-grid select,
+.log-filter-grid input {
+  width: 100%;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(11, 18, 23, 0.72);
+  color: #ffffff;
+  font: inherit;
+}
+
+.log-download-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.log-error {
+  color: var(--danger);
+}
+
+.log-payload-cell {
+  max-width: 680px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-card {
   display: flex;
   flex-direction: column;
@@ -3756,7 +3856,9 @@ button {
   .stats-grid,
   .section-grid,
   .module-grid,
-  .detail-grid {
+  .detail-grid,
+  .log-filter-grid,
+  .log-stat-strip {
     grid-template-columns: 1fr;
   }
 
@@ -3770,6 +3872,15 @@ button {
 
   .detail-card.wide {
     grid-column: span 1;
+  }
+
+  .log-header-card {
+    flex-direction: column;
+  }
+
+  .log-stat-strip {
+    min-width: 0;
+    width: 100%;
   }
 }
 
@@ -3859,6 +3970,8 @@ button {
   .ab-workspace-layout,
   .sensor-grid,
   .tv-app-history-filters,
+  .log-filter-grid,
+  .log-stat-strip,
   .remote-top-row,
   .remote-channel-row,
   .magic-remote-utility-grid,

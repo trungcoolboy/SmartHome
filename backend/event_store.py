@@ -136,6 +136,57 @@ class EventStore:
             )
         return items
 
+    def export_events(
+        self,
+        *,
+        limit: int = 10000,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        event_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT id, ts, source_type, source_id, event_type, direction, topic,
+                   payload_text, payload_json, state_json, metadata_json
+            FROM events
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_type:
+            clauses.append("source_type = ?")
+            params.append(source_type)
+        if source_id:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(max(1, min(limit, 200000)))
+
+        with self.lock:
+            rows = self.conn.execute(sql, params).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            items.append(
+                {
+                    "id": row["id"],
+                    "ts": row["ts"],
+                    "sourceType": row["source_type"],
+                    "sourceId": row["source_id"],
+                    "eventType": row["event_type"],
+                    "direction": row["direction"],
+                    "topic": row["topic"],
+                    "payloadText": row["payload_text"],
+                    "payloadJson": json.loads(row["payload_json"]) if row["payload_json"] else None,
+                    "state": json.loads(row["state_json"]) if row["state_json"] else None,
+                    "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
+                }
+            )
+        return items
+
     def stats(self) -> dict[str, Any]:
         with self.lock:
             id_bounds = self.conn.execute("SELECT MIN(id), MAX(id) FROM events").fetchone()

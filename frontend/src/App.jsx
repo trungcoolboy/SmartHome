@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getApiBaseUrl } from "./api";
 import MobileNav from "./components/MobileNav";
+import LogPage from "./components/LogPage";
 import ModulePage from "./components/ModulePage";
 import OverviewPage from "./components/OverviewPage";
 import Sidebar from "./components/Sidebar";
@@ -128,6 +129,8 @@ function App() {
       <main className="main-content">
         {activePage === "overview" ? (
           <OverviewPage onNavigate={setActivePage} />
+        ) : activePage === "logs" ? (
+          <LogPage />
         ) : (
           <ModulePage page={currentPage} alertFeed={alertFeed} />
         )}

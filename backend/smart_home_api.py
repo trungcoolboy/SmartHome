@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import cgi
+import csv
+import io
 import json
 import os
 import re
@@ -346,6 +348,49 @@ def build_tv_app_history(event_store: EventStore, state: TvState, limit: int = 2
     return {"tvId": state.tv_id, "items": items}
 
 
+def start_temperature_sample_logger(
+    state: BridgeState,
+    event_store: EventStore,
+    stop_event: threading.Event,
+    interval_seconds: float = 1.0,
+) -> threading.Thread:
+    def _run() -> None:
+        next_sample_at = time.monotonic()
+        while not stop_event.is_set():
+            now = time.monotonic()
+            if now < next_sample_at:
+                stop_event.wait(min(0.2, next_sample_at - now))
+                continue
+            next_sample_at = now + interval_seconds
+
+            snapshot = state.snapshot()
+            temperatures = snapshot.get("temperatures")
+            last_seen = snapshot.get("lastSeen")
+            if (
+                not snapshot.get("connected")
+                or not isinstance(temperatures, dict)
+                or not temperatures
+                or not last_seen
+                or time.time() - float(last_seen) > 5.0
+            ):
+                continue
+
+            event_store.record(
+                source_type="stm32",
+                source_id=state.board_id,
+                event_type="temperature_sample",
+                direction="rx",
+                payload_json={
+                    "temperatures": temperatures,
+                    "sampleIntervalSeconds": interval_seconds,
+                },
+            )
+
+    thread = threading.Thread(target=_run, name=f"{state.board_id}-temperature-logger", daemon=True)
+    thread.start()
+    return thread
+
+
 def start_integrated_tv_probe_loop(
     bridge: WebOsTvBridge,
     state: TvState,
@@ -459,6 +504,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history/stats":
             self._history_stats()
             return
+        if parsed.path == "/api/history/export":
+            self._history_export()
+            return
         if parsed.path == "/api/history":
             self._history()
             return
@@ -567,6 +615,80 @@ class Handler(BaseHTTPRequestHandler):
 
     def _history_stats(self) -> None:
         self._json(HTTPStatus.OK, self._require_event_store().stats())
+
+    def _history_export(self) -> None:
+        params = parse_qs(urlparse(self.path).query)
+        limit = max(1, min(int(params.get("limit", ["86400"])[0]), 200000))
+        source_type = params.get("source_type", [None])[0]
+        source_id = params.get("source_id", [None])[0]
+        event_type = params.get("event_type", [None])[0]
+        export_format = params.get("format", ["csv"])[0].lower()
+        items = self._require_event_store().export_events(
+            limit=limit,
+            source_type=source_type,
+            source_id=source_id,
+            event_type=event_type,
+        )
+
+        label = event_type or "all"
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        if export_format == "json":
+            body = json.dumps({"items": items}, ensure_ascii=True, indent=2).encode("utf-8")
+            self._download_response(
+                body,
+                content_type="application/json; charset=utf-8",
+                filename=f"smart-home-{label}-{timestamp}.json",
+            )
+            return
+
+        output = io.StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=[
+                "id",
+                "isoTime",
+                "unixTime",
+                "sourceType",
+                "sourceId",
+                "eventType",
+                "direction",
+                "topic",
+                "payloadText",
+                "payloadJson",
+                "state",
+                "metadata",
+            ],
+        )
+        writer.writeheader()
+        for item in items:
+            writer.writerow(
+                {
+                    "id": item["id"],
+                    "isoTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(item["ts"]))),
+                    "unixTime": item["ts"],
+                    "sourceType": item["sourceType"],
+                    "sourceId": item["sourceId"],
+                    "eventType": item["eventType"],
+                    "direction": item["direction"],
+                    "topic": item["topic"],
+                    "payloadText": item["payloadText"],
+                    "payloadJson": json.dumps(item["payloadJson"], ensure_ascii=True) if item["payloadJson"] is not None else "",
+                    "state": json.dumps(item["state"], ensure_ascii=True) if item["state"] is not None else "",
+                    "metadata": json.dumps(item["metadata"], ensure_ascii=True) if item["metadata"] is not None else "",
+                }
+            )
+        self._download_response(
+            output.getvalue().encode("utf-8"),
+            content_type="text/csv; charset=utf-8",
+            filename=f"smart-home-{label}-{timestamp}.csv",
+        )
+
+    def _download_response(self, body: bytes, *, content_type: str, filename: str) -> None:
+        self.send_response(HTTPStatus.OK)
+        self._write_common_headers(content_type=content_type, content_length=len(body))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(body)
 
     def _uploads(self) -> None:
         if self.command == "GET":
@@ -995,6 +1117,8 @@ def build_stm32_runtimes(
         bridge = SerialBridge(device, args.stm32_baudrate, state)
         sse_hub = SerialSseHub()
         bridge.start()
+        if event_store is not None:
+            start_temperature_sample_logger(state, event_store, stop_event)
         last_control_states_ref: dict[str, dict[str, str]] = {"states": {}}
 
         def _control_states(snapshot: dict[str, Any]) -> dict[str, str]:
