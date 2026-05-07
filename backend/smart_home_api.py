@@ -131,6 +131,11 @@ class RoomNodeRuntime:
     thread: threading.Thread | None = None
     event_store: EventStore | None = None
 
+    @staticmethod
+    def _is_relay_command(payload: dict[str, Any]) -> bool:
+        action = str(payload.get("action", ""))
+        return action in {"set_relay", "toggle_relay"}
+
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name=f"{self.state.node_id}-mqtt", daemon=True)
         self.thread.start()
@@ -165,11 +170,11 @@ class RoomNodeRuntime:
             text=True,
         )
         self.state.append_log("tx", self.command_topic, encoded)
-        if self.event_store is not None:
+        if self.event_store is not None and self._is_relay_command(payload):
             self.event_store.record(
                 source_type="room_node",
                 source_id=self.state.node_id,
-                event_type="command",
+                event_type="relay_command",
                 direction="tx",
                 topic=self.command_topic,
                 payload_text=encoded,
@@ -180,6 +185,8 @@ class RoomNodeRuntime:
 
     def _apply_topic_payload(self, topic: str, payload: str) -> None:
         now = time.time()
+        parsed_payload: Any | None = None
+        relay_changes: list[dict[str, Any]] = []
         try:
             if topic.endswith("/availability"):
                 with self.state.lock:
@@ -187,8 +194,10 @@ class RoomNodeRuntime:
                     self.state.connected = payload.strip() == "online"
                     self.state.last_seen = now
                     self.state.last_error = None
+                parsed_payload = {"availability": payload.strip()}
             elif topic.endswith("/telemetry") or topic.endswith("/state"):
                 data = json.loads(payload)
+                parsed_payload = data
                 with self.state.lock:
                     self.state.last_seen = now
                     self.state.last_error = None
@@ -200,16 +209,28 @@ class RoomNodeRuntime:
                     self.state.free_heap = data.get("freeHeap", self.state.free_heap)
                     self.state.led_mode = data.get("ledMode", self.state.led_mode)
                     if "remoteRelay" in data:
-                        self.state.remote_relay = bool(data.get("remoteRelay"))
+                        new_value = bool(data.get("remoteRelay"))
+                        old_value = self.state.remote_relay
+                        self.state.remote_relay = new_value
+                        if old_value is not None and old_value != new_value:
+                            relay_changes.append({"channel": "remoteRelay", "old": old_value, "new": new_value})
                     if "relay" in data:
-                        self.state.relays["relay"] = bool(data.get("relay"))
+                        new_value = bool(data.get("relay"))
+                        old_value = self.state.relays.get("relay")
+                        self.state.relays["relay"] = new_value
+                        if old_value is not None and old_value != new_value:
+                            relay_changes.append({"channel": "relay", "old": old_value, "new": new_value})
                     if "touch" in data:
                         self.state.touches["touch"] = bool(data.get("touch"))
                     for item in data.get("relays", []):
                         key = str(item.get("key", ""))
                         if not key:
                             continue
-                        self.state.relays[key] = bool(item.get("on"))
+                        new_value = bool(item.get("on"))
+                        old_value = self.state.relays.get(key)
+                        self.state.relays[key] = new_value
+                        if old_value is not None and old_value != new_value:
+                            relay_changes.append({"channel": key, "old": old_value, "new": new_value})
                         if "touchActive" in item:
                             self.state.touches[key] = bool(item.get("touchActive"))
                         if "ledMode" in item:
@@ -219,7 +240,11 @@ class RoomNodeRuntime:
                         if not key:
                             continue
                         if "relayOn" in item:
-                            self.state.relays[key] = bool(item.get("relayOn"))
+                            new_value = bool(item.get("relayOn"))
+                            old_value = self.state.relays.get(key)
+                            self.state.relays[key] = new_value
+                            if old_value is not None and old_value != new_value:
+                                relay_changes.append({"channel": key, "old": old_value, "new": new_value})
                         if "touchActive" in item:
                             self.state.touches[key] = bool(item.get("touchActive"))
                         if "ledMode" in item:
@@ -228,14 +253,15 @@ class RoomNodeRuntime:
             with self.state.lock:
                 self.state.last_error = str(exc)
         self.state.append_log("rx", topic, payload)
-        if self.event_store is not None:
+        if self.event_store is not None and relay_changes:
             self.event_store.record(
                 source_type="room_node",
                 source_id=self.state.node_id,
-                event_type="mqtt",
+                event_type="relay_change",
                 direction="rx",
                 topic=topic,
                 payload_text=payload,
+                payload_json={"changes": relay_changes, "payload": parsed_payload},
                 state=self.state.snapshot(),
             )
         self.sse_hub.publish({"type": "snapshot", "state": self.state.snapshot()})
@@ -331,52 +357,7 @@ def start_integrated_tv_probe_loop(
         return {key: value for key, value in snapshot.items() if key != "uptimeSeconds"}
 
     def _record_app_transition(previous_snapshot: dict[str, Any], current_snapshot: dict[str, Any], now: float) -> None:
-        if event_store is None:
-            return
-        previous_id = previous_snapshot.get("foregroundAppId")
-        current_id = current_snapshot.get("foregroundAppId")
-        previous_started_at = previous_snapshot.get("foregroundAppStartedAt")
-        previous_title = previous_snapshot.get("foregroundAppTitle") or previous_id
-        current_title = current_snapshot.get("foregroundAppTitle") or current_id
-        previous_reachable = bool(previous_snapshot.get("reachable"))
-        current_reachable = bool(current_snapshot.get("reachable"))
-        closed_previous_session = False
-
-        if previous_id and previous_started_at and (
-            previous_id != current_id or (previous_reachable and not current_reachable)
-        ):
-            duration_seconds = max(0.0, now - float(previous_started_at))
-            event_store.record(
-                source_type="tv",
-                source_id=state.tv_id,
-                event_type="app_session",
-                payload_json={
-                    "appId": previous_id,
-                    "title": previous_title,
-                    "startedAt": previous_started_at,
-                    "endedAt": now,
-                    "durationSeconds": duration_seconds,
-                    "durationMinutes": round(duration_seconds / 60.0, 3),
-                },
-                state=current_snapshot,
-            )
-            closed_previous_session = True
-        if current_id and current_reachable and (
-            previous_id != current_id or not previous_reachable or closed_previous_session
-        ):
-            event_store.record(
-                source_type="tv",
-                source_id=state.tv_id,
-                event_type="app_transition",
-                payload_json={
-                    "previousAppId": previous_id,
-                    "previousTitle": previous_title,
-                    "currentAppId": current_id,
-                    "currentTitle": current_title,
-                    "startedAt": current_snapshot.get("foregroundAppStartedAt"),
-                },
-                state=current_snapshot,
-            )
+        return
 
     def _run() -> None:
         last_snapshot = ""
@@ -436,13 +417,6 @@ def start_integrated_tv_probe_loop(
             encoded = json.dumps(_stable_snapshot(snapshot), sort_keys=True, ensure_ascii=True)
             if encoded != last_snapshot:
                 sse_hub.publish({"type": "snapshot", "state": snapshot})
-                if event_store is not None:
-                    event_store.record(
-                        source_type="tv",
-                        source_id=state.tv_id,
-                        event_type="snapshot",
-                        state=snapshot,
-                    )
                 last_snapshot = encoded
             time.sleep(0.75)
 
@@ -481,6 +455,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._json(HTTPStatus.OK, self._backend_health())
+            return
+        if parsed.path == "/api/history/stats":
+            self._history_stats()
             return
         if parsed.path == "/api/history":
             self._history()
@@ -587,6 +564,9 @@ class Handler(BaseHTTPRequestHandler):
             event_type=event_type,
         )
         self._json(HTTPStatus.OK, {"items": items})
+
+    def _history_stats(self) -> None:
+        self._json(HTTPStatus.OK, self._require_event_store().stats())
 
     def _uploads(self) -> None:
         if self.command == "GET":
@@ -803,15 +783,6 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
-            if self.event_store is not None:
-                self.event_store.record(
-                    source_type="tv",
-                    source_id=state.tv_id,
-                    event_type=action,
-                    direction="tx",
-                    payload_json=body,
-                    state=build_tv_snapshot(state),
-                )
         except Exception as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), "state": build_tv_snapshot(self._require_tv_state())})
             return
@@ -906,13 +877,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
-        if runtime.event_store is not None:
+        if (
+            runtime.event_store is not None
+            and len(command_parts) >= 3
+            and command_parts[0] in {"pump", "misc"}
+            and command_parts[2] in {"on", "off"}
+        ):
             runtime.event_store.record(
                 source_type="stm32",
                 source_id=runtime.state.board_id,
-                event_type="tx",
+                event_type="control_command",
                 direction="tx",
                 payload_text=text,
+                payload_json={
+                    "controlId": f"{command_parts[0]}.{command_parts[1]}",
+                    "value": command_parts[2],
+                },
                 state=runtime.state.snapshot(),
             )
         runtime.sse_hub.publish({"type": "tx", "payload": text, "ts": time.time()})
@@ -1015,16 +995,51 @@ def build_stm32_runtimes(
         bridge = SerialBridge(device, args.stm32_baudrate, state)
         sse_hub = SerialSseHub()
         bridge.start()
-        def _stm32_event_callback(event: dict[str, Any], snapshot: dict[str, Any], board_id: str = board_id) -> None:
+        last_control_states_ref: dict[str, dict[str, str]] = {"states": {}}
+
+        def _control_states(snapshot: dict[str, Any]) -> dict[str, str]:
+            controls = snapshot.get("controls")
+            if not isinstance(controls, dict):
+                return {}
+            states: dict[str, str] = {}
+            for control_id, control in controls.items():
+                if not isinstance(control, dict):
+                    continue
+                value = control.get("state")
+                if value in {"on", "off"}:
+                    states[str(control_id)] = str(value)
+            return states
+
+        def _stm32_event_callback(
+            event: dict[str, Any],
+            snapshot: dict[str, Any],
+            board_id: str = board_id,
+            last_control_states_ref: dict[str, dict[str, str]] = last_control_states_ref,
+        ) -> None:
             if event_store is None:
+                return
+            if event["type"] != "snapshot":
+                return
+            current_control_states = _control_states(snapshot)
+            previous_control_states = last_control_states_ref["states"]
+            if not previous_control_states:
+                last_control_states_ref["states"] = current_control_states
+                return
+            changes = [
+                {"controlId": control_id, "old": previous_control_states[control_id], "new": value}
+                for control_id, value in current_control_states.items()
+                if control_id in previous_control_states and previous_control_states[control_id] != value
+            ]
+            last_control_states_ref["states"] = current_control_states
+            if not changes:
                 return
             event_store.record(
                 source_type="stm32",
                 source_id=board_id,
-                event_type=event["type"],
-                direction="rx" if event["type"] == "rx" else None,
-                payload_text=event.get("payload"),
-                state=snapshot if event["type"] == "snapshot" else snapshot,
+                event_type="control_change",
+                direction="rx",
+                payload_json={"changes": changes},
+                state=snapshot,
             )
 
         start_publisher(state, sse_hub, stop_event, event_callback=_stm32_event_callback)

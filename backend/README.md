@@ -128,6 +128,22 @@ Health:
 curl http://127.0.0.1:8090/health
 ```
 
+Database log:
+
+```bash
+curl "http://127.0.0.1:8090/api/history?limit=20"
+curl "http://127.0.0.1:8090/api/history?event_type=relay_change&limit=20"
+curl "http://127.0.0.1:8090/api/history/stats"
+```
+
+Database chi ghi cac event relay/control on/off co y nghia, khong ghi telemetry/snapshot dinh ky.
+
+File SQLite nam tai:
+
+```bash
+/home/trungcoolboy/SmartHome/backend/state/smart_home_events.sqlite3
+```
+
 TV qua gateway:
 
 ```bash

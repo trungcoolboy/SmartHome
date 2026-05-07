@@ -135,3 +135,40 @@ class EventStore:
                 }
             )
         return items
+
+    def stats(self) -> dict[str, Any]:
+        with self.lock:
+            id_bounds = self.conn.execute("SELECT MIN(id), MAX(id) FROM events").fetchone()
+            first = self.conn.execute(
+                """
+                SELECT id, ts, source_type, source_id, event_type
+                FROM events
+                ORDER BY id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            last = self.conn.execute(
+                """
+                SELECT id, ts, source_type, source_id, event_type
+                FROM events
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        db_path = Path(self.db_path)
+        related_size = 0
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{self.db_path}{suffix}")
+            if path.exists():
+                related_size += path.stat().st_size
+
+        return {
+            "dbPath": str(db_path),
+            "dbSizeBytes": related_size,
+            "firstId": id_bounds[0],
+            "lastId": id_bounds[1],
+            "approxEventCount": ((id_bounds[1] - id_bounds[0] + 1) if id_bounds[0] and id_bounds[1] else 0),
+            "firstEvent": dict(first) if first else None,
+            "lastEvent": dict(last) if last else None,
+        }
