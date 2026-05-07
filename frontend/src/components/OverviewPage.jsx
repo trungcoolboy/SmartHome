@@ -93,21 +93,6 @@ function OverviewPage() {
       value: `${derived.onlineCount}/${derived.totalKnownDevices || 4}`,
       tone: derived.onlineCount >= 3 ? "good" : "warn",
     },
-    {
-      label: "Open Alerts",
-      value: String(derived.boardErrors + (derived.tvOnline ? 0 : 1)).padStart(2, "0"),
-      tone: derived.boardErrors + (derived.tvOnline ? 0 : 1) > 0 ? "warn" : "good",
-    },
-    {
-      label: "TV State",
-      value: derived.tvWakePending ? "Waking" : derived.pairedTv ? "Paired" : derived.tvOnline ? "Reachable" : "Offline",
-      tone: derived.tvWakePending ? "accent" : derived.pairedTv ? "accent" : derived.tvOnline ? "neutral" : "warn",
-    },
-    {
-      label: "Aqua Bridges",
-      value: `${derived.connectedBoards}/${derived.totalBoards || 3}`,
-      tone: derived.connectedBoards === derived.totalBoards && derived.totalBoards > 0 ? "good" : "warn",
-    },
   ];
 
   return (
