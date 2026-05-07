@@ -32,6 +32,9 @@ LedDrive probe_drive = LedDrive::Off;
 unsigned long probe_until_ms = 0;
 unsigned long last_touch_raw_change_ms = 0;
 unsigned long last_touch_toggle_ms = 0;
+unsigned long touch_raw_active_started_ms = 0;
+unsigned long last_touch_raw_pulse_ms = 0;
+unsigned long last_short_touch_pulse_ms = 0;
 unsigned long led_confirm_started_ms = 0;
 unsigned long touch_ignore_until_ms = 0;
 unsigned long touch_release_stable_since_ms = 0;
@@ -48,6 +51,8 @@ const char* pending_event = "state_sync";
 const char* pending_detail = nullptr;
 bool touch_armed = true;
 bool led_confirm_target_on = false;
+uint32_t touch_raw_pulses = 0;
+uint32_t touch_short_pulses = 0;
 
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
@@ -64,6 +69,26 @@ constexpr bool kTouchControlEnabled = true;
 
 bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
+}
+
+void track_touch_raw_transition(bool raw, unsigned long now_ms) {
+  if (raw) {
+    ++touch_raw_pulses;
+    touch_raw_active_started_ms = now_ms;
+    return;
+  }
+
+  if (touch_raw_active_started_ms == 0) {
+    return;
+  }
+
+  const unsigned long pulse_ms = now_ms - touch_raw_active_started_ms;
+  last_touch_raw_pulse_ms = pulse_ms;
+  if (pulse_ms < kTouchPressDebounceMs) {
+    ++touch_short_pulses;
+    last_short_touch_pulse_ms = pulse_ms;
+  }
+  touch_raw_active_started_ms = 0;
 }
 
 const char* led_drive_name(LedDrive drive) {
@@ -228,6 +253,13 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["uptimeMs"] = millis();
   doc["wifiRssi"] = WiFi.RSSI();
   doc["touch"] = touch_active;
+  doc["raw"] = last_touch_raw;
+  doc["pinLevel"] = digitalRead(NodeConfig::kTouchPin);
+  doc["rawPulses"] = touch_raw_pulses;
+  doc["shortPulses"] = touch_short_pulses;
+  doc["lastRawMs"] = last_touch_raw_pulse_ms;
+  doc["lastShortMs"] = last_short_touch_pulse_ms;
+  doc["rawHeldMs"] = last_touch_raw && touch_raw_active_started_ms != 0 ? millis() - touch_raw_active_started_ms : 0;
   doc["touchPin"] = NodeConfig::kTouchPin;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
@@ -240,7 +272,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
     doc["detail"] = detail;
   }
 
-  char payload[256];
+  char payload[512];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
   return mqtt_client.publish(NodeConfig::kStateTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
 }
@@ -257,6 +289,13 @@ bool publish_telemetry_now() {
   doc["ip"] = WiFi.localIP().toString();
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["touch"] = touch_active;
+  doc["raw"] = last_touch_raw;
+  doc["pinLevel"] = digitalRead(NodeConfig::kTouchPin);
+  doc["rawPulses"] = touch_raw_pulses;
+  doc["shortPulses"] = touch_short_pulses;
+  doc["lastRawMs"] = last_touch_raw_pulse_ms;
+  doc["lastShortMs"] = last_short_touch_pulse_ms;
+  doc["rawHeldMs"] = last_touch_raw && touch_raw_active_started_ms != 0 ? millis() - touch_raw_active_started_ms : 0;
   doc["touchPin"] = NodeConfig::kTouchPin;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
@@ -266,7 +305,7 @@ bool publish_telemetry_now() {
     doc["probe"] = led_drive_name(probe_drive);
   }
 
-  char payload[256];
+  char payload[512];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
   return mqtt_client.publish(NodeConfig::kTelemetryTopic, reinterpret_cast<const uint8_t*>(payload), len, false);
 }
@@ -353,6 +392,7 @@ void handle_touch() {
   const unsigned long now_ms = millis();
 
   if (raw != last_touch_raw) {
+    track_touch_raw_transition(raw, now_ms);
     last_touch_raw = raw;
     last_touch_raw_change_ms = now_ms;
   }
@@ -565,6 +605,9 @@ void init_gpio() {
   pinMode(NodeConfig::kTouchPin, INPUT_PULLUP);
   write_led_drive(LedDrive::Off);
   last_touch_raw = read_touch_active();
+  if (last_touch_raw) {
+    touch_raw_active_started_ms = millis();
+  }
   touch_active = last_touch_raw;
   last_touch_raw_change_ms = millis();
   last_touch_toggle_ms = 0;
@@ -593,7 +636,7 @@ void setup() {
 
   mqtt_client.setServer(NodeConfig::kMqttHost, NodeConfig::kMqttPort);
   mqtt_client.setCallback(mqtt_callback);
-  mqtt_client.setBufferSize(512);
+  mqtt_client.setBufferSize(768);
   mqtt_client.setKeepAlive(15);
   mqtt_client.setSocketTimeout(1);
 
