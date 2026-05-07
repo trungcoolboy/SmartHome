@@ -155,21 +155,22 @@ bool read_touch_active(uint8_t pin) {
 }
 
 void write_led_drive(uint8_t pin, LedDrive drive) {
-  if (drive == LedDrive::Off) {
-    pinMode(pin, INPUT);
-    return;
-  }
-
+  const int level = drive == LedDrive::Red ? 255 : 0;
   pinMode(pin, OUTPUT);
-  digitalWrite(pin, drive == LedDrive::Red ? HIGH : LOW);
+  analogWrite(pin, NodeConfig::kLedActiveHigh ? level : (255 - level));
+}
+
+void write_led_level(uint8_t pin, int level) {
+  const int constrained_level = level < 0 ? 0 : (level > 255 ? 255 : level);
+  pinMode(pin, OUTPUT);
+  analogWrite(pin, NodeConfig::kLedActiveHigh ? constrained_level : (255 - constrained_level));
 }
 
 const char* led_drive_name(LedDrive drive) {
   switch (drive) {
     case LedDrive::Red:
-      return "red";
+      return "on";
     case LedDrive::Green:
-      return "green";
     case LedDrive::Off:
     default:
       return "off";
@@ -205,7 +206,7 @@ LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
     case LedMode::On:
       return LedDrive::Red;
     case LedMode::Off:
-      return LedDrive::Green;
+      return LedDrive::Off;
     case LedMode::BlinkSlow:
     case LedMode::BlinkFast:
     case LedMode::DoubleBlink:
@@ -213,55 +214,57 @@ LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
     case LedMode::Breathe:
     case LedMode::Pulse:
     case LedMode::Candle:
-      return led_blink_on(channel.led_mode, now) ? LedDrive::Red : LedDrive::Green;
+      return led_blink_on(channel.led_mode, now) ? LedDrive::Red : LedDrive::Off;
     case LedMode::Auto:
     default:
-      return channel.relay_on ? LedDrive::Red : LedDrive::Green;
+      return channel.relay_on ? LedDrive::Red : LedDrive::Off;
   }
 }
 
-LedDrive touch_hold_led_drive(const ChannelState& channel, unsigned long now) {
+int touch_hold_led_level(const ChannelState& channel, unsigned long now) {
   if (!channel.touch_armed || !channel.last_touch_raw || channel.touch_active) {
-    return LedDrive::Off;
+    return -1;
   }
-  if ((now - channel.last_touch_raw_change_ms) >= kTouchHoldConfirmMs) {
-    return channel.relay_on ? LedDrive::Green : LedDrive::Red;
+  const unsigned long held_ms = now - channel.last_touch_raw_change_ms;
+  if (held_ms >= kTouchHoldConfirmMs) {
+    return channel.relay_on ? 0 : 255;
   }
-  return channel.relay_on ? LedDrive::Green : LedDrive::Red;
-}
-
-bool has_touch_hold_led(const ChannelState& channel) {
-  return channel.touch_armed && channel.last_touch_raw && !channel.touch_active;
+  const int progress = static_cast<int>((held_ms * 255UL) / kTouchHoldConfirmMs);
+  if (channel.relay_on) {
+    const int level = 255 - progress;
+    return level < 0 ? 0 : level;
+  }
+  return progress < 10 ? 10 : progress;
 }
 
 bool has_led_confirm(const ChannelState& channel) {
   return channel.led_confirm_started_ms != 0;
 }
 
-LedDrive led_confirm_drive(ChannelState& channel, unsigned long now) {
+int led_confirm_level(ChannelState& channel, unsigned long now) {
   const unsigned long elapsed = now - channel.led_confirm_started_ms;
   if (!channel.led_confirm_target_on) {
     if (elapsed < kLedConfirmFullMs) {
-      return LedDrive::Red;
+      return 255;
     }
     channel.led_confirm_started_ms = 0;
-    return LedDrive::Off;
+    return -1;
   }
 
   if (elapsed < kLedConfirmOffMs) {
-    return LedDrive::Off;
+    return 0;
   }
   if (elapsed < (kLedConfirmOffMs + kLedConfirmFullMs)) {
-    return LedDrive::Red;
+    return 255;
   }
 
   channel.led_confirm_started_ms = 0;
-  return LedDrive::Off;
+  return -1;
 }
 
 void update_leds() {
   if (!mqtt_client.connected()) {
-    const LedDrive blink_drive = ((millis() / 360UL) % 2UL) == 0 ? LedDrive::Red : LedDrive::Green;
+    const LedDrive blink_drive = ((millis() / 360UL) % 2UL) == 0 ? LedDrive::Red : LedDrive::Off;
     for (auto& channel : channels) {
       write_led_drive(channel.led_pin, blink_drive);
     }
@@ -271,11 +274,15 @@ void update_leds() {
   const unsigned long now = millis();
   for (auto& channel : channels) {
     if (has_led_confirm(channel)) {
-      write_led_drive(channel.led_pin, led_confirm_drive(channel, now));
-      continue;
+      const int level = led_confirm_level(channel, now);
+      if (level >= 0) {
+        write_led_level(channel.led_pin, level);
+        continue;
+      }
     }
-    if (has_touch_hold_led(channel)) {
-      write_led_drive(channel.led_pin, touch_hold_led_drive(channel, now));
+    const int hold_level = touch_hold_led_level(channel, now);
+    if (hold_level >= 0) {
+      write_led_level(channel.led_pin, hold_level);
       continue;
     }
     write_led_drive(channel.led_pin, led_drive_for_channel(channel, now));
@@ -616,6 +623,7 @@ void poll_touch_inputs() {
 }
 
 void init_gpio() {
+  analogWriteRange(255);
   for (auto& channel : channels) {
     pinMode(channel.relay_pin, OUTPUT);
     pinMode(channel.led_pin, OUTPUT);

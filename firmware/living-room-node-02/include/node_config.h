@@ -34,7 +34,7 @@ constexpr uint8_t kLed2Pin = 12;
 constexpr bool kRelay1ActiveHigh = true;
 constexpr bool kRelay2ActiveHigh = true;
 constexpr bool kTouchActiveHigh = true;
-// LED pins drive a tri-state LED: OUTPUT HIGH = red, OUTPUT LOW = green, INPUT = off.
+constexpr bool kLedActiveHigh = true;
 
 constexpr long kTimezoneOffsetSeconds = 7 * 3600;
 constexpr uint8_t kLedBreathStartHour = 22;

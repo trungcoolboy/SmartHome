@@ -161,7 +161,6 @@ const char* led_drive_name(LedDrive drive) {
     case LedDrive::Red:
       return "on";
     case LedDrive::Green:
-      return "on";
     case LedDrive::Off:
     default:
       return "off";
@@ -173,11 +172,7 @@ bool parse_led_drive(const char* value, LedDrive& drive) {
     drive = LedDrive::Red;
     return true;
   }
-  if (strcmp(value, "green") == 0 || strcmp(value, "low") == 0) {
-    drive = LedDrive::Green;
-    return true;
-  }
-  if (strcmp(value, "off") == 0 || strcmp(value, "hiz") == 0 || strcmp(value, "hi-z") == 0) {
+  if (strcmp(value, "off") == 0) {
     drive = LedDrive::Off;
     return true;
   }

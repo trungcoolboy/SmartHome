@@ -69,9 +69,8 @@ bool read_touch_active() {
 const char* led_drive_name(LedDrive drive) {
   switch (drive) {
     case LedDrive::Red:
-      return "red";
+      return "on";
     case LedDrive::Green:
-      return "green";
     case LedDrive::Off:
     default:
       return "off";
@@ -83,11 +82,7 @@ bool parse_led_drive(const char* value, LedDrive& drive) {
     drive = LedDrive::Red;
     return true;
   }
-  if (strcmp(value, "green") == 0 || strcmp(value, "low") == 0) {
-    drive = LedDrive::Green;
-    return true;
-  }
-  if (strcmp(value, "off") == 0 || strcmp(value, "hiz") == 0 || strcmp(value, "hi-z") == 0) {
+  if (strcmp(value, "off") == 0) {
     drive = LedDrive::Off;
     return true;
   }
@@ -96,21 +91,16 @@ bool parse_led_drive(const char* value, LedDrive& drive) {
 
 void write_led_drive(LedDrive drive) {
   led_drive = drive;
-  switch (drive) {
-    case LedDrive::Red:
-      pinMode(NodeConfig::kLedPin, OUTPUT);
-      digitalWrite(NodeConfig::kLedPin, HIGH);
-      break;
-    case LedDrive::Green:
-      pinMode(NodeConfig::kLedPin, OUTPUT);
-      digitalWrite(NodeConfig::kLedPin, LOW);
-      break;
-    case LedDrive::Off:
-    default:
-      digitalWrite(NodeConfig::kLedPin, LOW);
-      pinMode(NodeConfig::kLedPin, INPUT);
-      break;
-  }
+  const int level = drive == LedDrive::Red ? 255 : 0;
+  pinMode(NodeConfig::kLedPin, OUTPUT);
+  analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
+}
+
+void write_led_level(int level) {
+  const int constrained_level = level < 0 ? 0 : (level > 255 ? 255 : level);
+  led_drive = constrained_level > 0 ? LedDrive::Red : LedDrive::Off;
+  pinMode(NodeConfig::kLedPin, OUTPUT);
+  analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? constrained_level : (255 - constrained_level));
 }
 
 void release_probe_pin() {
@@ -118,7 +108,7 @@ void release_probe_pin() {
     return;
   }
   digitalWrite(probe_pin, LOW);
-  pinMode(probe_pin, INPUT);
+  pinMode(probe_pin, OUTPUT);
   probe_pin = 255;
   probe_until_ms = 0;
   probe_drive = LedDrive::Off;
@@ -146,21 +136,26 @@ void write_probe_pin(uint8_t pin, LedDrive drive, unsigned long duration_ms) {
   probe_drive = drive;
   probe_until_ms = duration_ms == 0 ? 0 : millis() + duration_ms;
 
-  switch (drive) {
-    case LedDrive::Red:
-      pinMode(pin, OUTPUT);
-      digitalWrite(pin, HIGH);
-      break;
-    case LedDrive::Green:
-      pinMode(pin, OUTPUT);
-      digitalWrite(pin, LOW);
-      break;
-    case LedDrive::Off:
-    default:
-      digitalWrite(pin, LOW);
-      pinMode(pin, INPUT);
-      break;
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, drive == LedDrive::Red ? HIGH : LOW);
+}
+
+int touch_hold_led_level(unsigned long now_ms) {
+  if (!touch_armed || !last_touch_raw || touch_active) {
+    return -1;
   }
+
+  const unsigned long held_ms = now_ms - last_touch_raw_change_ms;
+  if (held_ms >= kTouchPressDebounceMs) {
+    return remote_relay_on ? 0 : 255;
+  }
+
+  const int progress = static_cast<int>((held_ms * 255UL) / kTouchPressDebounceMs);
+  if (remote_relay_on) {
+    const int level = 255 - progress;
+    return level < 0 ? 0 : level;
+  }
+  return progress < 10 ? 10 : progress;
 }
 
 void update_led() {
@@ -181,25 +176,26 @@ void update_led() {
     const unsigned long elapsed_ms = millis() - led_confirm_started_ms;
     if (!led_confirm_target_on) {
       if (elapsed_ms < kLedConfirmFullMs) {
-        write_led_drive(LedDrive::Red);
+        write_led_level(255);
         return;
       }
       led_confirm_started_ms = 0;
     } else {
       if (elapsed_ms < kLedConfirmOffMs) {
-        write_led_drive(LedDrive::Off);
+        write_led_level(0);
         return;
       }
       if (elapsed_ms < (kLedConfirmOffMs + kLedConfirmFullMs)) {
-        write_led_drive(LedDrive::Red);
+        write_led_level(255);
         return;
       }
       led_confirm_started_ms = 0;
     }
   }
 
-  if (touch_armed && last_touch_raw && !touch_active) {
-    write_led_drive(remote_relay_on ? LedDrive::Green : LedDrive::Red);
+  const int hold_level = touch_hold_led_level(millis());
+  if (hold_level >= 0) {
+    write_led_level(hold_level);
     return;
   }
 
@@ -211,7 +207,7 @@ void update_led() {
     write_led_drive(LedDrive::Red);
     return;
   }
-  write_led_drive(remote_relay_on ? LedDrive::Red : LedDrive::Off);
+  write_led_level(remote_relay_on ? 255 : 0);
 }
 
 bool publish_availability(const char* value) {
@@ -565,6 +561,7 @@ void setup_ota() {
 }
 
 void init_gpio() {
+  analogWriteRange(255);
   pinMode(NodeConfig::kTouchPin, INPUT_PULLUP);
   write_led_drive(LedDrive::Off);
   last_touch_raw = read_touch_active();
