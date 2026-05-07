@@ -891,7 +891,7 @@ class Handler(BaseHTTPRequestHandler):
             source = item.get("sourceId")
             event_type = item.get("eventType")
             row_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(item["ts"])))
-            if event_type in {"relay_change", "control_change"}:
+            if event_type == "relay_change":
                 changes = payload.get("changes")
                 if not isinstance(changes, list):
                     continue
@@ -917,15 +917,6 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 )
                 continue
-            if event_type == "control_command":
-                rows.append(
-                    {
-                        "time": row_time,
-                        "source": source,
-                        "relay": payload.get("controlId"),
-                        "state": payload.get("value"),
-                    }
-                )
         for index, row in enumerate(rows, start=1):
             row["stt"] = index
         return rows
@@ -994,7 +985,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        if event_type in {"relay_change", "relay_command", "control_change", "control_command"}:
+        if event_type in {"relay_change", "relay_command"}:
             rows = self._relay_export_rows(items)
             if export_format == "json":
                 body = json.dumps({"items": rows}, ensure_ascii=True, indent=2).encode("utf-8")

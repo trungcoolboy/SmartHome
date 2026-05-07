@@ -86,7 +86,7 @@ function buildRelayRows(items) {
     if (!payload) {
       continue;
     }
-    if ((item.eventType === "relay_change" || item.eventType === "control_change") && Array.isArray(payload.changes)) {
+    if (item.eventType === "relay_change" && Array.isArray(payload.changes)) {
       for (const change of payload.changes) {
         rows.push({
           id: `${item.id}-${change.channel || change.controlId}`,
@@ -107,15 +107,6 @@ function buildRelayRows(items) {
         state: Object.prototype.hasOwnProperty.call(payload, "value") ? payload.value : payload.action,
       });
       continue;
-    }
-    if (item.eventType === "control_command") {
-      rows.push({
-        id: String(item.id),
-        time: item.ts,
-        source: item.sourceId,
-        relay: payload.controlId,
-        state: payload.value,
-      });
     }
   }
   return rows.map((row, index) => ({ ...row, stt: index + 1 }));
@@ -139,7 +130,7 @@ function buildTvRows(items) {
 }
 
 function isRelayEventType(eventType) {
-  return ["relay_change", "relay_command", "control_change", "control_command"].includes(eventType);
+  return ["relay_change", "relay_command"].includes(eventType);
 }
 
 function buildQuery({ eventType, sourceType, limit, format }) {
