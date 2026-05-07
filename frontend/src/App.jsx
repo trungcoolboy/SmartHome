@@ -5,6 +5,7 @@ import LogPage from "./components/LogPage";
 import ModulePage from "./components/ModulePage";
 import OverviewPage from "./components/OverviewPage";
 import Sidebar from "./components/Sidebar";
+import StatisticsPage from "./components/StatisticsPage";
 import { alertFeed, navItems, pageContent } from "./components/mockData";
 
 function getInitialPage() {
@@ -131,6 +132,8 @@ function App() {
           <OverviewPage onNavigate={setActivePage} />
         ) : activePage === "logs" ? (
           <LogPage />
+        ) : activePage === "statistics" ? (
+          <StatisticsPage />
         ) : (
           <ModulePage page={currentPage} alertFeed={alertFeed} />
         )}

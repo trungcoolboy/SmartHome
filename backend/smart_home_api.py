@@ -520,6 +520,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history":
             self._history()
             return
+        if parsed.path == "/api/statistics":
+            self._statistics()
+            return
         if parsed.path == "/api/uploads":
             self._uploads()
             return
@@ -625,6 +628,222 @@ class Handler(BaseHTTPRequestHandler):
 
     def _history_stats(self) -> None:
         self._json(HTTPStatus.OK, self._require_event_store().stats())
+
+    @staticmethod
+    def _is_on_value(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value).strip().lower() in {"on", "true", "1", "yes"}
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total_seconds = max(0, int(round(seconds)))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        if hours:
+            return f"{hours}h {minutes:02d}m"
+        return f"{minutes}m"
+
+    def _relay_statistics(self, start_ts: float, end_ts: float) -> list[dict[str, Any]]:
+        event_store = self._require_event_store()
+        previous_events = event_store.events_before(event_type="relay_change", before_ts=start_ts, limit=10000)
+        window_events = event_store.events_between(
+            event_type="relay_change",
+            start_ts=start_ts,
+            end_ts=end_ts,
+            limit=200000,
+        )
+
+        relay_states: dict[str, bool] = {}
+        relay_labels: dict[str, dict[str, str]] = {}
+        durations: dict[str, float] = {}
+
+        def _changes(item: dict[str, Any]) -> list[dict[str, Any]]:
+            payload = item.get("payloadJson")
+            if not isinstance(payload, dict):
+                return []
+            changes = payload.get("changes")
+            return [change for change in changes if isinstance(change, dict)] if isinstance(changes, list) else []
+
+        for item in previous_events:
+            source_id = str(item.get("sourceId") or "")
+            for change in _changes(item):
+                relay = str(change.get("channel") or "")
+                if not relay:
+                    continue
+                key = f"{source_id}.{relay}"
+                relay_states[key] = self._is_on_value(change.get("new"))
+                relay_labels[key] = {"source": source_id, "relay": relay}
+
+        for item in window_events:
+            source_id = str(item.get("sourceId") or "")
+            for change in _changes(item):
+                relay = str(change.get("channel") or "")
+                if not relay:
+                    continue
+                key = f"{source_id}.{relay}"
+                relay_labels[key] = {"source": source_id, "relay": relay}
+                if key not in relay_states and "old" in change:
+                    relay_states[key] = self._is_on_value(change.get("old"))
+
+        last_ts = start_ts
+        for item in window_events:
+            event_ts = float(item["ts"])
+            delta = max(0.0, min(event_ts, end_ts) - last_ts)
+            for key, is_on in relay_states.items():
+                if is_on:
+                    durations[key] = durations.get(key, 0.0) + delta
+            last_ts = min(event_ts, end_ts)
+
+            source_id = str(item.get("sourceId") or "")
+            for change in _changes(item):
+                relay = str(change.get("channel") or "")
+                if not relay:
+                    continue
+                key = f"{source_id}.{relay}"
+                relay_labels[key] = {"source": source_id, "relay": relay}
+                relay_states[key] = self._is_on_value(change.get("new"))
+
+        delta = max(0.0, end_ts - last_ts)
+        for key, is_on in relay_states.items():
+            if is_on:
+                durations[key] = durations.get(key, 0.0) + delta
+
+        keys = sorted(set(relay_labels) | set(durations))
+        return [
+            {
+                "source": relay_labels.get(key, {}).get("source", key.rsplit(".", 1)[0]),
+                "relay": relay_labels.get(key, {}).get("relay", key.rsplit(".", 1)[-1]),
+                "secondsOn": round(durations.get(key, 0.0), 3),
+                "duration": self._format_duration(durations.get(key, 0.0)),
+                "currentlyOn": bool(relay_states.get(key)),
+            }
+            for key in keys
+        ]
+
+    def _tv_statistics(self, start_ts: float, end_ts: float) -> list[dict[str, Any]]:
+        sessions = self._require_event_store().events_between(
+            event_type="app_session",
+            start_ts=start_ts,
+            end_ts=end_ts,
+            limit=10000,
+        )
+        app_seconds: dict[str, float] = {}
+
+        for item in sessions:
+            payload = item.get("payloadJson")
+            if not isinstance(payload, dict):
+                continue
+            app = str(payload.get("app") or payload.get("title") or payload.get("appId") or "Unknown")
+            started_at = float(payload.get("startedAt") or item["ts"])
+            ended_at = float(payload.get("endedAt") or item["ts"])
+            seconds = max(0.0, min(ended_at, end_ts) - max(started_at, start_ts))
+            app_seconds[app] = app_seconds.get(app, 0.0) + seconds
+
+        if self.tv_state is not None:
+            snapshot = build_tv_snapshot(self.tv_state)
+            app = snapshot.get("foregroundAppTitle") or snapshot.get("foregroundAppId")
+            started_at = snapshot.get("foregroundAppStartedAt")
+            if snapshot.get("reachable") and app and started_at:
+                seconds = max(0.0, end_ts - max(float(started_at), start_ts))
+                app_seconds[str(app)] = app_seconds.get(str(app), 0.0) + seconds
+
+        return [
+            {
+                "app": app,
+                "secondsOn": round(seconds, 3),
+                "duration": self._format_duration(seconds),
+            }
+            for app, seconds in sorted(app_seconds.items(), key=lambda item: item[1], reverse=True)
+        ]
+
+    def _temperature_statistics(self, start_ts: float, end_ts: float) -> list[dict[str, Any]]:
+        events = self._require_event_store().events_between(
+            event_type="temperature_sample",
+            start_ts=start_ts,
+            end_ts=end_ts,
+            limit=200000,
+        )
+        bucket_seconds = 60.0
+        buckets: dict[str, dict[int, dict[str, float]]] = {}
+        totals: dict[str, dict[str, float]] = {}
+
+        for item in events:
+            payload = item.get("payloadJson")
+            if not isinstance(payload, dict):
+                continue
+            readings = payload.get("readings")
+            if not isinstance(readings, list):
+                temperatures = payload.get("temperatures")
+                if isinstance(temperatures, dict):
+                    readings = [
+                        {"sensor": sensor, "temp": value.get("celsius")}
+                        for sensor, value in temperatures.items()
+                        if isinstance(value, dict)
+                    ]
+                else:
+                    continue
+
+            bucket_ts = int(start_ts + (int((float(item["ts"]) - start_ts) // bucket_seconds) * bucket_seconds))
+            for reading in readings:
+                if not isinstance(reading, dict):
+                    continue
+                sensor = str(reading.get("sensor") or "")
+                if not sensor:
+                    continue
+                try:
+                    temp = float(reading.get("temp"))
+                except (TypeError, ValueError):
+                    continue
+
+                bucket = buckets.setdefault(sensor, {}).setdefault(bucket_ts, {"sum": 0.0, "count": 0.0})
+                bucket["sum"] += temp
+                bucket["count"] += 1.0
+
+                total = totals.setdefault(sensor, {"sum": 0.0, "count": 0.0, "min": temp, "max": temp, "latest": temp})
+                total["sum"] += temp
+                total["count"] += 1.0
+                total["min"] = min(total["min"], temp)
+                total["max"] = max(total["max"], temp)
+                total["latest"] = temp
+
+        series: list[dict[str, Any]] = []
+        for sensor, sensor_buckets in sorted(buckets.items()):
+            total = totals[sensor]
+            series.append(
+                {
+                    "sensor": sensor,
+                    "latest": round(total["latest"], 3),
+                    "min": round(total["min"], 3),
+                    "max": round(total["max"], 3),
+                    "avg": round(total["sum"] / total["count"], 3) if total["count"] else None,
+                    "points": [
+                        {"ts": ts, "temp": round(values["sum"] / values["count"], 3)}
+                        for ts, values in sorted(sensor_buckets.items())
+                        if values["count"]
+                    ],
+                }
+            )
+        return series
+
+    def _statistics(self) -> None:
+        params = parse_qs(urlparse(self.path).query)
+        hours = max(1.0, min(float(params.get("hours", ["24"])[0]), 24 * 30))
+        end_ts = time.time()
+        start_ts = end_ts - (hours * 3600.0)
+        self._json(
+            HTTPStatus.OK,
+            {
+                "windowHours": hours,
+                "startTs": start_ts,
+                "endTs": end_ts,
+                "relays": self._relay_statistics(start_ts, end_ts),
+                "tvApps": self._tv_statistics(start_ts, end_ts),
+                "temperatures": self._temperature_statistics(start_ts, end_ts),
+            },
+        )
 
     def _temperature_export_rows(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -1261,6 +1480,7 @@ def parse_args() -> argparse.Namespace:
         "--event-db-path",
         default=str(Path(__file__).with_name("state") / "smart_home_events.sqlite3"),
     )
+    parser.add_argument("--event-retention-days", type=float, default=30.0)
     parser.add_argument(
         "--upload-dir",
         default=str(Path("/home/trungcoolboy/smart-home/uploads/dashboard")),
@@ -1286,53 +1506,8 @@ def build_stm32_runtimes(
         bridge.start()
         if event_store is not None:
             start_temperature_sample_logger(state, event_store, stop_event)
-        last_control_states_ref: dict[str, dict[str, str]] = {"states": {}}
 
-        def _control_states(snapshot: dict[str, Any]) -> dict[str, str]:
-            controls = snapshot.get("controls")
-            if not isinstance(controls, dict):
-                return {}
-            states: dict[str, str] = {}
-            for control_id, control in controls.items():
-                if not isinstance(control, dict):
-                    continue
-                value = control.get("state")
-                if value in {"on", "off"}:
-                    states[str(control_id)] = str(value)
-            return states
-
-        def _stm32_event_callback(
-            event: dict[str, Any],
-            snapshot: dict[str, Any],
-            board_id: str = board_id,
-            last_control_states_ref: dict[str, dict[str, str]] = last_control_states_ref,
-        ) -> None:
-            if event_store is None:
-                return
-            if event["type"] != "snapshot":
-                return
-            current_control_states = _control_states(snapshot)
-            previous_control_states = last_control_states_ref["states"]
-            if not previous_control_states:
-                last_control_states_ref["states"] = current_control_states
-                return
-            changes = [
-                {"controlId": control_id, "old": previous_control_states[control_id], "new": value}
-                for control_id, value in current_control_states.items()
-                if control_id in previous_control_states and previous_control_states[control_id] != value
-            ]
-            last_control_states_ref["states"] = current_control_states
-            if not changes:
-                return
-            event_store.record(
-                source_type="stm32",
-                source_id=board_id,
-                event_type="control_change",
-                direction="rx",
-                payload_json={"changes": changes},
-            )
-
-        start_publisher(state, sse_hub, stop_event, event_callback=_stm32_event_callback)
+        start_publisher(state, sse_hub, stop_event)
         runtimes[route_prefix] = Stm32Runtime(
             route_prefix=route_prefix,
             state=state,
@@ -1376,7 +1551,7 @@ def main() -> int:
     args = parse_args()
     socket.setdefaulttimeout(15)
     stop_event = threading.Event()
-    event_store = EventStore(args.event_db_path)
+    event_store = EventStore(args.event_db_path, retention_days=args.event_retention_days)
 
     def _shutdown(signum: int, frame: Any) -> None:
         del signum, frame

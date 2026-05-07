@@ -138,7 +138,7 @@ curl -o temperature.csv "http://127.0.0.1:8090/api/history/export?event_type=tem
 curl "http://127.0.0.1:8090/api/history/stats"
 ```
 
-Database chi ghi cac event relay/control on/off co y nghia va mau nhiet do STM32 moi 1s, khong ghi telemetry/snapshot dinh ky.
+Database chi giu log trong 30 ngay. Database chi ghi cac event relay/control on/off co y nghia va mau nhiet do STM32 moi 1s, khong ghi telemetry/snapshot dinh ky.
 Dashboard co trang Logs de xem preview va tai CSV/JSON.
 
 File SQLite nam tai:

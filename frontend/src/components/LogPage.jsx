@@ -3,12 +3,9 @@ import { getApiBaseUrl } from "../api";
 
 const eventTypeOptions = [
   { value: "", label: "All logs" },
-  { value: "temperature_sample", label: "Temperature 1s" },
-  { value: "relay_change", label: "Relay changed" },
-  { value: "relay_command", label: "Relay command" },
-  { value: "control_change", label: "STM32 control changed" },
-  { value: "control_command", label: "STM32 control command" },
-  { value: "app_session", label: "TV app sessions" },
+  { value: "temperature_sample", label: "Temperature" },
+  { value: "relay_change", label: "Relay" },
+  { value: "app_session", label: "TV App" },
 ];
 
 const sourceOptions = [
