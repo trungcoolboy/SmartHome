@@ -8,12 +8,14 @@ const eventTypeOptions = [
   { value: "relay_command", label: "Relay command" },
   { value: "control_change", label: "STM32 control changed" },
   { value: "control_command", label: "STM32 control command" },
+  { value: "app_session", label: "TV app sessions" },
 ];
 
 const sourceOptions = [
   { value: "", label: "All sources" },
   { value: "stm32", label: "STM32" },
   { value: "room_node", label: "Room nodes" },
+  { value: "tv", label: "TV" },
 ];
 
 function formatDateTime(unixSeconds) {
@@ -28,6 +30,11 @@ function formatPayload(item) {
   if (!payload) {
     return item.payloadText || "-";
   }
+  if (item.eventType === "temperature_sample" && Array.isArray(payload.readings)) {
+    return payload.readings
+      .map((sensor) => `${sensor.sensor}: ${sensor.temp}C raw ${sensor.raw}`)
+      .join(" / ");
+  }
   if (item.eventType === "temperature_sample" && payload.temperatures) {
     return Object.values(payload.temperatures)
       .map((sensor) => `${sensor.key}: ${sensor.celsius}C`)
@@ -39,6 +46,103 @@ function formatPayload(item) {
       .join(" / ");
   }
   return JSON.stringify(payload);
+}
+
+function buildTemperatureRows(items) {
+  const rows = [];
+  for (const item of items) {
+    const payload = item.payloadJson;
+    if (!payload) {
+      continue;
+    }
+    if (Array.isArray(payload.readings)) {
+      for (const reading of payload.readings) {
+        rows.push({
+          id: `${item.id}-${reading.sensor}`,
+          time: item.ts,
+          sensor: reading.sensor,
+          temp: reading.temp,
+          raw: reading.raw,
+        });
+      }
+      continue;
+    }
+    if (payload.temperatures) {
+      for (const [sensor, reading] of Object.entries(payload.temperatures)) {
+        rows.push({
+          id: `${item.id}-${sensor}`,
+          time: item.ts,
+          sensor,
+          temp: reading.celsius,
+          raw: reading.raw,
+        });
+      }
+    }
+  }
+  return rows.map((row, index) => ({ ...row, stt: index + 1 }));
+}
+
+function buildRelayRows(items) {
+  const rows = [];
+  for (const item of items) {
+    const payload = item.payloadJson;
+    if (!payload) {
+      continue;
+    }
+    if ((item.eventType === "relay_change" || item.eventType === "control_change") && Array.isArray(payload.changes)) {
+      for (const change of payload.changes) {
+        rows.push({
+          id: `${item.id}-${change.channel || change.controlId}`,
+          time: item.ts,
+          source: item.sourceId,
+          relay: change.channel || change.controlId,
+          state: change.new,
+        });
+      }
+      continue;
+    }
+    if (item.eventType === "relay_command") {
+      rows.push({
+        id: String(item.id),
+        time: item.ts,
+        source: item.sourceId,
+        relay: payload.channel || "relay",
+        state: Object.prototype.hasOwnProperty.call(payload, "value") ? payload.value : payload.action,
+      });
+      continue;
+    }
+    if (item.eventType === "control_command") {
+      rows.push({
+        id: String(item.id),
+        time: item.ts,
+        source: item.sourceId,
+        relay: payload.controlId,
+        state: payload.value,
+      });
+    }
+  }
+  return rows.map((row, index) => ({ ...row, stt: index + 1 }));
+}
+
+function buildTvRows(items) {
+  const rows = [];
+  for (const item of items) {
+    const payload = item.payloadJson;
+    if (!payload) {
+      continue;
+    }
+    rows.push({
+      id: String(item.id),
+      app: payload.app || payload.title || payload.appId,
+      startedAt: payload.startedAt,
+      endedAt: payload.endedAt,
+    });
+  }
+  return rows.map((row, index) => ({ ...row, stt: index + 1 }));
+}
+
+function isRelayEventType(eventType) {
+  return ["relay_change", "relay_command", "control_change", "control_command"].includes(eventType);
 }
 
 function buildQuery({ eventType, sourceType, limit, format }) {
@@ -71,6 +175,9 @@ function LogPage() {
     () => buildQuery({ eventType, sourceType, limit: 50 }),
     [eventType, sourceType],
   );
+  const temperatureRows = useMemo(() => buildTemperatureRows(items), [items]);
+  const relayRows = useMemo(() => buildRelayRows(items), [items]);
+  const tvRows = useMemo(() => buildTvRows(items), [items]);
 
   useEffect(() => {
     let cancelled = false;
@@ -136,7 +243,7 @@ function LogPage() {
         <div>
           <span className="eyebrow">Logs</span>
           <h2>Export database logs</h2>
-          <p>Download temperature samples and relay/control events from the local SQLite database.</p>
+          <p>Download temperature samples, relay/control events and TV app sessions from the local SQLite database.</p>
         </div>
         <div className="log-stat-strip">
           <div>
@@ -202,33 +309,123 @@ function LogPage() {
           </div>
         </div>
         {error ? <p className="log-error">{error}</p> : null}
-        <div className="tv-app-history-table-wrap">
-          <table className="tv-app-history-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Source</th>
-                <th>Type</th>
-                <th>Payload</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <tr key={item.id}>
-                  <td>{formatDateTime(item.ts)}</td>
-                  <td>{item.sourceId}</td>
-                  <td>{item.eventType}</td>
-                  <td className="log-payload-cell">{formatPayload(item)}</td>
-                </tr>
-              ))}
-              {!items.length && !loading ? (
+        {eventType === "temperature_sample" ? (
+          <div className="tv-app-history-table-wrap">
+            <table className="tv-app-history-table">
+              <thead>
                 <tr>
-                  <td colSpan="4">No matching logs.</td>
+                  <th>STT</th>
+                  <th>Time</th>
+                  <th>Sensor</th>
+                  <th>Temp</th>
+                  <th>Raw</th>
                 </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {temperatureRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.stt}</td>
+                    <td>{formatDateTime(row.time)}</td>
+                    <td>{row.sensor}</td>
+                    <td>{row.temp}</td>
+                    <td>{row.raw}</td>
+                  </tr>
+                ))}
+                {!temperatureRows.length && !loading ? (
+                  <tr>
+                    <td colSpan="5">No matching logs.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        ) : isRelayEventType(eventType) ? (
+          <div className="tv-app-history-table-wrap">
+            <table className="tv-app-history-table">
+              <thead>
+                <tr>
+                  <th>STT</th>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Relay</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {relayRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.stt}</td>
+                    <td>{formatDateTime(row.time)}</td>
+                    <td>{row.source}</td>
+                    <td>{row.relay}</td>
+                    <td>{String(row.state)}</td>
+                  </tr>
+                ))}
+                {!relayRows.length && !loading ? (
+                  <tr>
+                    <td colSpan="5">No matching logs.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        ) : eventType === "app_session" ? (
+          <div className="tv-app-history-table-wrap">
+            <table className="tv-app-history-table">
+              <thead>
+                <tr>
+                  <th>STT</th>
+                  <th>App</th>
+                  <th>Started At</th>
+                  <th>Ended At</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tvRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.stt}</td>
+                    <td>{row.app}</td>
+                    <td>{formatDateTime(row.startedAt)}</td>
+                    <td>{formatDateTime(row.endedAt)}</td>
+                  </tr>
+                ))}
+                {!tvRows.length && !loading ? (
+                  <tr>
+                    <td colSpan="4">No matching logs.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="tv-app-history-table-wrap">
+            <table className="tv-app-history-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Type</th>
+                  <th>Payload</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.id}>
+                    <td>{formatDateTime(item.ts)}</td>
+                    <td>{item.sourceId}</td>
+                    <td>{item.eventType}</td>
+                    <td className="log-payload-cell">{formatPayload(item)}</td>
+                  </tr>
+                ))}
+                {!items.length && !loading ? (
+                  <tr>
+                    <td colSpan="4">No matching logs.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </>
   );

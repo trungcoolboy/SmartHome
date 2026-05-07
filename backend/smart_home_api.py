@@ -133,11 +133,6 @@ class RoomNodeRuntime:
     thread: threading.Thread | None = None
     event_store: EventStore | None = None
 
-    @staticmethod
-    def _is_relay_command(payload: dict[str, Any]) -> bool:
-        action = str(payload.get("action", ""))
-        return action in {"set_relay", "toggle_relay"}
-
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name=f"{self.state.node_id}-mqtt", daemon=True)
         self.thread.start()
@@ -172,17 +167,6 @@ class RoomNodeRuntime:
             text=True,
         )
         self.state.append_log("tx", self.command_topic, encoded)
-        if self.event_store is not None and self._is_relay_command(payload):
-            self.event_store.record(
-                source_type="room_node",
-                source_id=self.state.node_id,
-                event_type="relay_command",
-                direction="tx",
-                topic=self.command_topic,
-                payload_text=encoded,
-                payload_json=payload,
-                state=self.state.snapshot(),
-            )
         self.sse_hub.publish({"type": "tx", "topic": self.command_topic, "payload": encoded, "ts": time.time()})
 
     def _apply_topic_payload(self, topic: str, payload: str) -> None:
@@ -262,9 +246,7 @@ class RoomNodeRuntime:
                 event_type="relay_change",
                 direction="rx",
                 topic=topic,
-                payload_text=payload,
-                payload_json={"changes": relay_changes, "payload": parsed_payload},
-                state=self.state.snapshot(),
+                payload_json={"changes": relay_changes},
             )
         self.sse_hub.publish({"type": "snapshot", "state": self.state.snapshot()})
         self.sse_hub.publish({"type": "rx", "topic": topic, "payload": payload, "ts": now})
@@ -381,8 +363,15 @@ def start_temperature_sample_logger(
                 event_type="temperature_sample",
                 direction="rx",
                 payload_json={
-                    "temperatures": temperatures,
-                    "sampleIntervalSeconds": interval_seconds,
+                    "readings": [
+                        {
+                            "sensor": sensor_name,
+                            "temp": sensor.get("celsius"),
+                            "raw": sensor.get("raw"),
+                        }
+                        for sensor_name, sensor in temperatures.items()
+                        if isinstance(sensor, dict)
+                    ],
                 },
             )
 
@@ -402,7 +391,28 @@ def start_integrated_tv_probe_loop(
         return {key: value for key, value in snapshot.items() if key != "uptimeSeconds"}
 
     def _record_app_transition(previous_snapshot: dict[str, Any], current_snapshot: dict[str, Any], now: float) -> None:
-        return
+        if event_store is None:
+            return
+        previous_id = previous_snapshot.get("foregroundAppId")
+        current_id = current_snapshot.get("foregroundAppId")
+        previous_started_at = previous_snapshot.get("foregroundAppStartedAt")
+        previous_title = previous_snapshot.get("foregroundAppTitle") or previous_id
+        previous_reachable = bool(previous_snapshot.get("reachable"))
+        current_reachable = bool(current_snapshot.get("reachable"))
+
+        if previous_id and previous_started_at and (
+            previous_id != current_id or (previous_reachable and not current_reachable)
+        ):
+            event_store.record(
+                source_type="tv",
+                source_id=state.tv_id,
+                event_type="app_session",
+                payload_json={
+                    "app": previous_title,
+                    "startedAt": previous_started_at,
+                    "endedAt": now,
+                },
+            )
 
     def _run() -> None:
         last_snapshot = ""
@@ -616,6 +626,118 @@ class Handler(BaseHTTPRequestHandler):
     def _history_stats(self) -> None:
         self._json(HTTPStatus.OK, self._require_event_store().stats())
 
+    def _temperature_export_rows(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            payload = item.get("payloadJson")
+            if not isinstance(payload, dict):
+                continue
+            readings = payload.get("readings")
+            if isinstance(readings, list):
+                for reading in readings:
+                    if not isinstance(reading, dict):
+                        continue
+                    rows.append(
+                        {
+                            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(item["ts"]))),
+                            "sensor": reading.get("sensor"),
+                            "temp": reading.get("temp"),
+                            "raw": reading.get("raw"),
+                        }
+                    )
+                continue
+            temperatures = payload.get("temperatures")
+            if isinstance(temperatures, dict):
+                for sensor_name, sensor in temperatures.items():
+                    if not isinstance(sensor, dict):
+                        continue
+                    rows.append(
+                        {
+                            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(item["ts"]))),
+                            "sensor": sensor_name,
+                            "temp": sensor.get("celsius"),
+                            "raw": sensor.get("raw"),
+                        }
+                    )
+        for index, row in enumerate(rows, start=1):
+            row["stt"] = index
+        return rows
+
+    def _relay_export_rows(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            payload = item.get("payloadJson")
+            if not isinstance(payload, dict):
+                continue
+            source = item.get("sourceId")
+            event_type = item.get("eventType")
+            row_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(item["ts"])))
+            if event_type in {"relay_change", "control_change"}:
+                changes = payload.get("changes")
+                if not isinstance(changes, list):
+                    continue
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    rows.append(
+                        {
+                            "time": row_time,
+                            "source": source,
+                            "relay": change.get("channel") or change.get("controlId"),
+                            "state": change.get("new"),
+                        }
+                    )
+                continue
+            if event_type == "relay_command":
+                rows.append(
+                    {
+                        "time": row_time,
+                        "source": source,
+                        "relay": payload.get("channel") or "relay",
+                        "state": payload.get("value") if "value" in payload else payload.get("action"),
+                    }
+                )
+                continue
+            if event_type == "control_command":
+                rows.append(
+                    {
+                        "time": row_time,
+                        "source": source,
+                        "relay": payload.get("controlId"),
+                        "state": payload.get("value"),
+                    }
+                )
+        for index, row in enumerate(rows, start=1):
+            row["stt"] = index
+        return rows
+
+    def _tv_app_export_rows(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            payload = item.get("payloadJson")
+            if not isinstance(payload, dict):
+                continue
+            started_at = payload.get("startedAt")
+            ended_at = payload.get("endedAt")
+            rows.append(
+                {
+                    "app": payload.get("app") or payload.get("title") or payload.get("appId"),
+                    "startedAt": (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(started_at)))
+                        if started_at is not None
+                        else ""
+                    ),
+                    "endedAt": (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ended_at)))
+                        if ended_at is not None
+                        else ""
+                    ),
+                }
+            )
+        for index, row in enumerate(rows, start=1):
+            row["stt"] = index
+        return rows
+
     def _history_export(self) -> None:
         params = parse_qs(urlparse(self.path).query)
         limit = max(1, min(int(params.get("limit", ["86400"])[0]), 200000))
@@ -632,6 +754,69 @@ class Handler(BaseHTTPRequestHandler):
 
         label = event_type or "all"
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        if event_type == "temperature_sample":
+            rows = self._temperature_export_rows(items)
+            if export_format == "json":
+                body = json.dumps({"items": rows}, ensure_ascii=True, indent=2).encode("utf-8")
+                self._download_response(
+                    body,
+                    content_type="application/json; charset=utf-8",
+                    filename=f"smart-home-{label}-{timestamp}.json",
+                )
+                return
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=["stt", "time", "sensor", "temp", "raw"])
+            writer.writeheader()
+            writer.writerows(rows)
+            self._download_response(
+                output.getvalue().encode("utf-8"),
+                content_type="text/csv; charset=utf-8",
+                filename=f"smart-home-{label}-{timestamp}.csv",
+            )
+            return
+
+        if event_type in {"relay_change", "relay_command", "control_change", "control_command"}:
+            rows = self._relay_export_rows(items)
+            if export_format == "json":
+                body = json.dumps({"items": rows}, ensure_ascii=True, indent=2).encode("utf-8")
+                self._download_response(
+                    body,
+                    content_type="application/json; charset=utf-8",
+                    filename=f"smart-home-{label}-{timestamp}.json",
+                )
+                return
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=["stt", "time", "source", "relay", "state"])
+            writer.writeheader()
+            writer.writerows(rows)
+            self._download_response(
+                output.getvalue().encode("utf-8"),
+                content_type="text/csv; charset=utf-8",
+                filename=f"smart-home-{label}-{timestamp}.csv",
+            )
+            return
+
+        if event_type == "app_session":
+            rows = self._tv_app_export_rows(items)
+            if export_format == "json":
+                body = json.dumps({"items": rows}, ensure_ascii=True, indent=2).encode("utf-8")
+                self._download_response(
+                    body,
+                    content_type="application/json; charset=utf-8",
+                    filename=f"smart-home-{label}-{timestamp}.json",
+                )
+                return
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=["stt", "app", "startedAt", "endedAt"])
+            writer.writeheader()
+            writer.writerows(rows)
+            self._download_response(
+                output.getvalue().encode("utf-8"),
+                content_type="text/csv; charset=utf-8",
+                filename=f"smart-home-{label}-{timestamp}.csv",
+            )
+            return
+
         if export_format == "json":
             body = json.dumps({"items": items}, ensure_ascii=True, indent=2).encode("utf-8")
             self._download_response(
@@ -999,24 +1184,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
             return
-        if (
-            runtime.event_store is not None
-            and len(command_parts) >= 3
-            and command_parts[0] in {"pump", "misc"}
-            and command_parts[2] in {"on", "off"}
-        ):
-            runtime.event_store.record(
-                source_type="stm32",
-                source_id=runtime.state.board_id,
-                event_type="control_command",
-                direction="tx",
-                payload_text=text,
-                payload_json={
-                    "controlId": f"{command_parts[0]}.{command_parts[1]}",
-                    "value": command_parts[2],
-                },
-                state=runtime.state.snapshot(),
-            )
         runtime.sse_hub.publish({"type": "tx", "payload": text, "ts": time.time()})
         self._json(HTTPStatus.OK, {"ok": True, "sent": text, "state": runtime.state.snapshot()})
 
@@ -1163,7 +1330,6 @@ def build_stm32_runtimes(
                 event_type="control_change",
                 direction="rx",
                 payload_json={"changes": changes},
-                state=snapshot,
             )
 
         start_publisher(state, sse_hub, stop_event, event_callback=_stm32_event_callback)
