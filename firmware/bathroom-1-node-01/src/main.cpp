@@ -42,14 +42,18 @@ struct ChannelState {
   bool touch_active;
   bool last_touch_raw;
   unsigned long last_touch_raw_change_ms;
+  unsigned long last_touch_toggle_ms;
+  unsigned long led_confirm_started_ms;
   LedMode led_mode;
   LedDrive led_drive;
+  bool touch_armed;
+  bool led_confirm_target_on;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, LedMode::Auto, LedDrive::Off},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, LedMode::Auto, LedDrive::Off},
-  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, LedMode::Auto, LedDrive::Off},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, true, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, 0, 0, LedMode::Auto, LedDrive::Off, true, false},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, true, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, 0, 0, LedMode::Auto, LedDrive::Off, true, false},
+  {"touch3", 255, NodeConfig::kTouch3Pin, NodeConfig::kLed3Pin, false, true, false, false, false, 0, 0, 0, LedMode::Auto, LedDrive::Off, true, false},
 };
 
 constexpr char kRemoteNode02CommandTopic[] = "smarthome/bathroom-1-node-02/command";
@@ -73,6 +77,10 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
+constexpr unsigned long kTouchHoldConfirmMs = 650;
+constexpr unsigned long kTouchReleaseDebounceMs = 250;
+constexpr unsigned long kTouchRetriggerGuardMs = 1200;
+constexpr unsigned long kLedConfirmFullMs = 260;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -237,6 +245,58 @@ void write_led_drive(uint8_t pin, LedDrive drive) {
   write_led_level(pin, drive == LedDrive::Off ? 0 : 255);
 }
 
+bool channel_auto_on(const ChannelState& channel) {
+  if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
+    return remote_node02_relay_on;
+  }
+  return channel.has_relay ? channel.relay_on : false;
+}
+
+int touch_hold_led_level(const ChannelState& channel, unsigned long now_ms) {
+  if (!channel.touch_armed || !channel.last_touch_raw || channel.touch_active) {
+    return -1;
+  }
+
+  const bool currently_on = channel_auto_on(channel);
+  const unsigned long held_ms = now_ms - channel.last_touch_raw_change_ms;
+  if (held_ms >= kTouchHoldConfirmMs) {
+    return currently_on ? 0 : 255;
+  }
+
+  const int progress = static_cast<int>((held_ms * 255UL) / kTouchHoldConfirmMs);
+  if (currently_on) {
+    const int level = 255 - progress;
+    return level < 0 ? 0 : level;
+  }
+
+  return progress < 10 ? 10 : progress;
+}
+
+int led_confirm_level(ChannelState& channel, unsigned long now_ms) {
+  if (channel.led_confirm_started_ms == 0) {
+    return -1;
+  }
+
+  const unsigned long elapsed_ms = now_ms - channel.led_confirm_started_ms;
+  if (!channel.led_confirm_target_on) {
+    if (elapsed_ms < kLedConfirmFullMs) {
+      return 255;
+    }
+    channel.led_confirm_started_ms = 0;
+    return -1;
+  }
+
+  if (elapsed_ms < 80UL) {
+    return 0;
+  }
+  if (elapsed_ms < (80UL + kLedConfirmFullMs)) {
+    return 255;
+  }
+
+  channel.led_confirm_started_ms = 0;
+  return -1;
+}
+
 void update_leds() {
   if (!mqtt_client.connected()) {
     const bool blink_on = ((millis() / 360UL) % 2UL) == 0;
@@ -250,15 +310,19 @@ void update_leds() {
 
   for (size_t i = 0; i < (sizeof(channels) / sizeof(channels[0])); ++i) {
     auto& channel = channels[i];
-    bool auto_on = false;
-    if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
-      auto_on = remote_node02_relay_on;
-    } else if (channel.has_relay) {
-      auto_on = channel.relay_on;
+    const unsigned long now_ms = millis();
+    int level = led_confirm_level(channel, now_ms);
+    if (level < 0) {
+      level = touch_hold_led_level(channel, now_ms);
     }
-    const int level = led_level_for_mode(channel.led_mode, auto_on);
-    channel.led_drive = level > 0 ? LedDrive::Red : LedDrive::Off;
-    write_led_level(channel.led_pin, level);
+    if (level >= 0) {
+      channel.led_drive = level > 0 ? LedDrive::Red : LedDrive::Off;
+      write_led_level(channel.led_pin, level);
+      continue;
+    }
+    const int steady_level = led_level_for_mode(channel.led_mode, channel_auto_on(channel));
+    channel.led_drive = steady_level > 0 ? LedDrive::Red : LedDrive::Off;
+    write_led_level(channel.led_pin, steady_level);
   }
 }
 
@@ -641,24 +705,43 @@ void poll_touch_inputs() {
       continue;
     }
 
-    if (raw == channel.touch_active) {
-      continue;
-    }
+    if (raw) {
+      if (!channel.touch_armed || channel.touch_active) {
+        continue;
+      }
+      if ((now - channel.last_touch_toggle_ms) < kTouchRetriggerGuardMs) {
+        continue;
+      }
+      if ((now - channel.last_touch_raw_change_ms) < kTouchHoldConfirmMs) {
+        continue;
+      }
 
-    if ((now - channel.last_touch_raw_change_ms) < NodeConfig::kTouchDebounceMs) {
-      continue;
-    }
+      channel.touch_active = true;
+      channel.touch_armed = false;
+      channel.last_touch_toggle_ms = now;
+      telemetry_dirty = true;
 
-    const bool was_active = channel.touch_active;
-    channel.touch_active = raw;
-    telemetry_dirty = true;
-
-    if (!was_active && channel.touch_active) {
       if (channel.has_relay) {
         toggle_channel(channel, "touch_toggle");
+        channel.led_confirm_target_on = channel.relay_on;
       } else {
+        channel.led_confirm_target_on = !remote_node02_relay_on;
         handle_aux_touch(channel);
       }
+      channel.led_confirm_started_ms = now;
+      update_leds();
+      continue;
+    }
+
+    if (channel.touch_active && (now - channel.last_touch_raw_change_ms) >= kTouchReleaseDebounceMs) {
+      channel.touch_active = false;
+      telemetry_dirty = true;
+    }
+
+    if (!channel.touch_active && !channel.touch_armed &&
+        (now - channel.last_touch_raw_change_ms) >= kTouchReleaseDebounceMs &&
+        (now - channel.last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+      channel.touch_armed = true;
     }
   }
 }
@@ -672,8 +755,11 @@ void init_gpio() {
     write_led_drive(channel.led_pin, channel.led_drive);
     pinMode(channel.touch_pin, NodeConfig::kTouchActiveHigh ? INPUT : INPUT_PULLUP);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
-    channel.touch_active = channel.last_touch_raw;
+    channel.touch_active = false;
     channel.last_touch_raw_change_ms = millis();
+    channel.last_touch_toggle_ms = 0;
+    channel.led_confirm_started_ms = 0;
+    channel.touch_armed = !channel.last_touch_raw;
     apply_channel_output(channel);
   }
 }

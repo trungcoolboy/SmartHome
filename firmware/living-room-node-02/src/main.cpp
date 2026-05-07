@@ -41,12 +41,16 @@ struct ChannelState {
   bool touch_active;
   bool last_touch_raw;
   unsigned long last_touch_raw_change_ms;
+  unsigned long last_touch_toggle_ms;
+  unsigned long led_confirm_started_ms;
   LedMode led_mode;
+  bool touch_armed;
+  bool led_confirm_target_on;
 };
 
 ChannelState channels[] = {
-  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, LedMode::Auto},
-  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, LedMode::Auto},
+  {"relay1", NodeConfig::kRelay1Pin, NodeConfig::kTouch1Pin, NodeConfig::kLed1Pin, NodeConfig::kRelay1ActiveHigh, false, false, false, 0, 0, 0, LedMode::Auto, true, false},
+  {"relay2", NodeConfig::kRelay2Pin, NodeConfig::kTouch2Pin, NodeConfig::kLed2Pin, NodeConfig::kRelay2ActiveHigh, false, false, false, 0, 0, 0, LedMode::Auto, true, false},
 };
 
 unsigned long last_telemetry_ms = 0;
@@ -65,6 +69,11 @@ const char* pending_detail = nullptr;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
+constexpr unsigned long kTouchHoldConfirmMs = 650;
+constexpr unsigned long kTouchReleaseDebounceMs = 250;
+constexpr unsigned long kTouchRetriggerGuardMs = 1200;
+constexpr unsigned long kLedConfirmOffMs = 80;
+constexpr unsigned long kLedConfirmFullMs = 260;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -211,6 +220,45 @@ LedDrive led_drive_for_channel(const ChannelState& channel, unsigned long now) {
   }
 }
 
+LedDrive touch_hold_led_drive(const ChannelState& channel, unsigned long now) {
+  if (!channel.touch_armed || !channel.last_touch_raw || channel.touch_active) {
+    return LedDrive::Off;
+  }
+  if ((now - channel.last_touch_raw_change_ms) >= kTouchHoldConfirmMs) {
+    return channel.relay_on ? LedDrive::Green : LedDrive::Red;
+  }
+  return channel.relay_on ? LedDrive::Green : LedDrive::Red;
+}
+
+bool has_touch_hold_led(const ChannelState& channel) {
+  return channel.touch_armed && channel.last_touch_raw && !channel.touch_active;
+}
+
+bool has_led_confirm(const ChannelState& channel) {
+  return channel.led_confirm_started_ms != 0;
+}
+
+LedDrive led_confirm_drive(ChannelState& channel, unsigned long now) {
+  const unsigned long elapsed = now - channel.led_confirm_started_ms;
+  if (!channel.led_confirm_target_on) {
+    if (elapsed < kLedConfirmFullMs) {
+      return LedDrive::Red;
+    }
+    channel.led_confirm_started_ms = 0;
+    return LedDrive::Off;
+  }
+
+  if (elapsed < kLedConfirmOffMs) {
+    return LedDrive::Off;
+  }
+  if (elapsed < (kLedConfirmOffMs + kLedConfirmFullMs)) {
+    return LedDrive::Red;
+  }
+
+  channel.led_confirm_started_ms = 0;
+  return LedDrive::Off;
+}
+
 void update_leds() {
   if (!mqtt_client.connected()) {
     const LedDrive blink_drive = ((millis() / 360UL) % 2UL) == 0 ? LedDrive::Red : LedDrive::Green;
@@ -222,6 +270,14 @@ void update_leds() {
 
   const unsigned long now = millis();
   for (auto& channel : channels) {
+    if (has_led_confirm(channel)) {
+      write_led_drive(channel.led_pin, led_confirm_drive(channel, now));
+      continue;
+    }
+    if (has_touch_hold_led(channel)) {
+      write_led_drive(channel.led_pin, touch_hold_led_drive(channel, now));
+      continue;
+    }
     write_led_drive(channel.led_pin, led_drive_for_channel(channel, now));
   }
 }
@@ -524,19 +580,37 @@ void poll_touch_inputs() {
       continue;
     }
 
-    if (raw == channel.touch_active) {
-      continue;
-    }
+    if (raw) {
+      if (!channel.touch_armed || channel.touch_active) {
+        continue;
+      }
+      if ((now - channel.last_touch_toggle_ms) < kTouchRetriggerGuardMs) {
+        continue;
+      }
+      if ((now - channel.last_touch_raw_change_ms) < kTouchHoldConfirmMs) {
+        continue;
+      }
 
-    if ((now - channel.last_touch_raw_change_ms) < NodeConfig::kTouchDebounceMs) {
-      continue;
-    }
-
-    const bool was_active = channel.touch_active;
-    channel.touch_active = raw;
-    telemetry_dirty = true;
-    if (!was_active && channel.touch_active) {
+      channel.touch_active = true;
+      channel.touch_armed = false;
+      channel.last_touch_toggle_ms = now;
+      telemetry_dirty = true;
       toggle_channel(channel, "touch_toggle");
+      channel.led_confirm_target_on = channel.relay_on;
+      channel.led_confirm_started_ms = now;
+      update_leds();
+      continue;
+    }
+
+    if (channel.touch_active && (now - channel.last_touch_raw_change_ms) >= kTouchReleaseDebounceMs) {
+      channel.touch_active = false;
+      telemetry_dirty = true;
+    }
+
+    if (!channel.touch_active && !channel.touch_armed &&
+        (now - channel.last_touch_raw_change_ms) >= kTouchReleaseDebounceMs &&
+        (now - channel.last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+      channel.touch_armed = true;
     }
   }
 }
@@ -547,8 +621,11 @@ void init_gpio() {
     pinMode(channel.led_pin, OUTPUT);
     pinMode(channel.touch_pin, INPUT);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
-    channel.touch_active = channel.last_touch_raw;
+    channel.touch_active = false;
     channel.last_touch_raw_change_ms = millis();
+    channel.last_touch_toggle_ms = 0;
+    channel.led_confirm_started_ms = 0;
+    channel.touch_armed = !channel.last_touch_raw;
     apply_channel_output(channel);
   }
 }

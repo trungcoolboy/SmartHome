@@ -37,6 +37,7 @@ unsigned long last_wifi_begin_ms = 0;
 unsigned long last_mqtt_attempt_ms = 0;
 unsigned long last_touch_raw_change_ms = 0;
 unsigned long last_touch_toggle_ms = 0;
+unsigned long led_confirm_started_ms = 0;
 unsigned long last_local_action_ms = 0;
 unsigned long mqtt_retry_backoff_ms = 2000;
 bool wifi_begin_called = false;
@@ -46,12 +47,15 @@ const char* pending_event = "state_sync";
 const char* pending_detail = nullptr;
 bool time_configured = false;
 bool touch_armed = true;
+bool led_confirm_target_on = false;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchPressDebounceMs = 60;
-constexpr unsigned long kTouchReleaseDebounceMs = 40;
-constexpr unsigned long kTouchRetriggerGuardMs = 350;
+constexpr unsigned long kTouchHoldConfirmMs = 650;
+constexpr unsigned long kTouchReleaseDebounceMs = 250;
+constexpr unsigned long kTouchRetriggerGuardMs = 1200;
+constexpr unsigned long kLedConfirmOffMs = 80;
+constexpr unsigned long kLedConfirmFullMs = 260;
 
 bool as_output_level(bool active, bool active_high) {
   return active_high ? active : !active;
@@ -175,6 +179,50 @@ bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
 }
 
+int touch_hold_led_level(unsigned long now_ms) {
+  if (!touch_armed || !last_touch_raw || touch_active) {
+    return -1;
+  }
+
+  const unsigned long held_ms = now_ms - last_touch_raw_change_ms;
+  if (held_ms >= kTouchHoldConfirmMs) {
+    return relay_on ? 0 : 255;
+  }
+
+  const int progress = static_cast<int>((held_ms * 255UL) / kTouchHoldConfirmMs);
+  if (relay_on) {
+    const int level = 255 - progress;
+    return level < 0 ? 0 : level;
+  }
+
+  return progress < 10 ? 10 : progress;
+}
+
+int led_confirm_level(unsigned long now_ms) {
+  if (led_confirm_started_ms == 0) {
+    return -1;
+  }
+
+  const unsigned long elapsed_ms = now_ms - led_confirm_started_ms;
+  if (!led_confirm_target_on) {
+    if (elapsed_ms < kLedConfirmFullMs) {
+      return 255;
+    }
+    led_confirm_started_ms = 0;
+    return -1;
+  }
+
+  if (elapsed_ms < kLedConfirmOffMs) {
+    return 0;
+  }
+  if (elapsed_ms < (kLedConfirmOffMs + kLedConfirmFullMs)) {
+    return 255;
+  }
+
+  led_confirm_started_ms = 0;
+  return -1;
+}
+
 void write_buzzer(bool active) {
   digitalWrite(NodeConfig::kBuzzerPin, as_output_level(active, NodeConfig::kBuzzerActiveHigh) ? HIGH : LOW);
 }
@@ -196,12 +244,22 @@ void update_buzzer() {
 }
 
 void write_led() {
-  if (!mqtt_client.connected()) {
-    const int level = ((millis() / 180) % 2) ? 255 : 0;
+  const unsigned long now_ms = millis();
+  int level = led_confirm_level(now_ms);
+  if (level < 0) {
+    level = touch_hold_led_level(now_ms);
+  }
+  if (level >= 0) {
     analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
     return;
   }
-  const int level = relay_on ? 255 : 0;
+
+  if (!mqtt_client.connected()) {
+    level = ((millis() / 180) % 2) ? 255 : 0;
+    analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
+    return;
+  }
+  level = relay_on ? 255 : 0;
   analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? level : (255 - level));
 }
 
@@ -459,41 +517,53 @@ void init_gpio() {
   write_buzzer(false);
   apply_output();
   last_touch_raw = read_touch_active();
-  touch_active = last_touch_raw;
+  touch_active = false;
   last_touch_raw_change_ms = millis();
   last_touch_toggle_ms = 0;
-  touch_armed = !touch_active;
+  touch_armed = !last_touch_raw;
 }
 
 void poll_touch() {
-  const bool raw = read_touch_active();
   const unsigned long now = millis();
+  const bool raw = read_touch_active();
   if (raw != last_touch_raw) {
     last_touch_raw = raw;
     last_touch_raw_change_ms = now;
-  }
-
-  if (raw == touch_active) {
     return;
   }
 
-  const unsigned long debounce_ms = raw ? kTouchPressDebounceMs : kTouchReleaseDebounceMs;
-  if ((now - last_touch_raw_change_ms) < debounce_ms) {
-    return;
-  }
+  if (raw) {
+    if (!touch_armed || touch_active) {
+      return;
+    }
+    if ((now - last_touch_toggle_ms) < kTouchRetriggerGuardMs) {
+      return;
+    }
+    if ((now - last_touch_raw_change_ms) < kTouchHoldConfirmMs) {
+      return;
+    }
 
-  touch_active = raw;
-  if (!touch_active) {
-    touch_armed = true;
-    telemetry_dirty = true;
-    queue_state("touch_release");
-    return;
-  }
-
-  if (touch_armed && (now - last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+    touch_active = true;
     touch_armed = false;
     last_touch_toggle_ms = now;
+    telemetry_dirty = true;
     toggle_relay("touch_toggle");
+    led_confirm_target_on = relay_on;
+    led_confirm_started_ms = now;
+    write_led();
+    return;
+  }
+
+  if (touch_active && (now - last_touch_raw_change_ms) >= kTouchReleaseDebounceMs) {
+    touch_active = false;
+    telemetry_dirty = true;
+    queue_state("touch_release");
+  }
+
+  if (!touch_active && !touch_armed &&
+      (now - last_touch_raw_change_ms) >= kTouchReleaseDebounceMs &&
+      (now - last_touch_toggle_ms) >= kTouchRetriggerGuardMs) {
+    touch_armed = true;
   }
 }
 

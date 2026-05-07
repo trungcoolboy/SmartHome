@@ -32,6 +32,7 @@ LedDrive probe_drive = LedDrive::Off;
 unsigned long probe_until_ms = 0;
 unsigned long last_touch_raw_change_ms = 0;
 unsigned long last_touch_toggle_ms = 0;
+unsigned long led_confirm_started_ms = 0;
 unsigned long touch_ignore_until_ms = 0;
 unsigned long touch_release_stable_since_ms = 0;
 unsigned long last_telemetry_ms = 0;
@@ -46,6 +47,7 @@ bool state_dirty = false;
 const char* pending_event = "state_sync";
 const char* pending_detail = nullptr;
 bool touch_armed = true;
+bool led_confirm_target_on = false;
 
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
@@ -56,6 +58,8 @@ constexpr unsigned long kTouchRetriggerGuardMs = 3000;
 constexpr unsigned long kTouchIgnoreAfterToggleMs = 1800;
 constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 1200;
 constexpr unsigned long kTouchRearmReleaseStableMs = 900;
+constexpr unsigned long kLedConfirmOffMs = 80;
+constexpr unsigned long kLedConfirmFullMs = 260;
 constexpr bool kTouchControlEnabled = true;
 
 bool read_touch_active() {
@@ -172,6 +176,32 @@ void update_led() {
     return;
   }
   led_override_until_ms = 0;
+
+  if (led_confirm_started_ms != 0) {
+    const unsigned long elapsed_ms = millis() - led_confirm_started_ms;
+    if (!led_confirm_target_on) {
+      if (elapsed_ms < kLedConfirmFullMs) {
+        write_led_drive(LedDrive::Red);
+        return;
+      }
+      led_confirm_started_ms = 0;
+    } else {
+      if (elapsed_ms < kLedConfirmOffMs) {
+        write_led_drive(LedDrive::Off);
+        return;
+      }
+      if (elapsed_ms < (kLedConfirmOffMs + kLedConfirmFullMs)) {
+        write_led_drive(LedDrive::Red);
+        return;
+      }
+      led_confirm_started_ms = 0;
+    }
+  }
+
+  if (touch_armed && last_touch_raw && !touch_active) {
+    write_led_drive(remote_relay_on ? LedDrive::Green : LedDrive::Red);
+    return;
+  }
 
   if (!mqtt_client.connected()) {
     write_led_drive(((millis() / 180) % 2) != 0 ? LedDrive::Red : LedDrive::Off);
@@ -380,6 +410,9 @@ void handle_touch() {
     } else {
       queue_state(kRemoteControlEnabled ? "remote_toggle_failed" : "remote_disabled");
     }
+    led_confirm_target_on = !remote_relay_on;
+    led_confirm_started_ms = now_ms;
+    update_led();
     telemetry_dirty = true;
   }
 }
@@ -538,6 +571,7 @@ void init_gpio() {
   touch_active = last_touch_raw;
   last_touch_raw_change_ms = millis();
   last_touch_toggle_ms = 0;
+  led_confirm_started_ms = 0;
   touch_release_stable_since_ms = touch_active ? 0 : millis();
   touch_armed = !touch_active;
   update_led();
