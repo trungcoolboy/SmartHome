@@ -33,7 +33,7 @@ constexpr uint8_t kLed2Pin = 12;
 // Change these if your relay or touch boards use opposite logic.
 constexpr bool kRelay1ActiveHigh = true;
 constexpr bool kRelay2ActiveHigh = true;
-constexpr bool kTouchActiveHigh = true;
+constexpr bool kTouchActiveHigh = false;
 constexpr bool kLedActiveHigh = true;
 
 constexpr long kTimezoneOffsetSeconds = 7 * 3600;

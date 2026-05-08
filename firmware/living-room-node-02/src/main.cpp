@@ -627,7 +627,7 @@ void init_gpio() {
   for (auto& channel : channels) {
     pinMode(channel.relay_pin, OUTPUT);
     pinMode(channel.led_pin, OUTPUT);
-    pinMode(channel.touch_pin, INPUT);
+    pinMode(channel.touch_pin, NodeConfig::kTouchActiveHigh ? INPUT : INPUT_PULLUP);
     channel.last_touch_raw = read_touch_active(channel.touch_pin);
     channel.touch_active = false;
     channel.last_touch_raw_change_ms = millis();
