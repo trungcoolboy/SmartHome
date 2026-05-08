@@ -78,6 +78,8 @@ constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
 constexpr unsigned long kTouchHoldConfirmMs = 650;
+constexpr unsigned long kRemoteTouchTurnOnHoldConfirmMs = 3000;
+constexpr unsigned long kRemoteTouchTurnOffHoldConfirmMs = 650;
 constexpr unsigned long kTouchReleaseDebounceMs = 250;
 constexpr unsigned long kTouchRetriggerGuardMs = 1200;
 constexpr unsigned long kLedConfirmFullMs = 260;
@@ -229,7 +231,20 @@ void write_led_level(uint8_t pin, int level) {
   const int constrained_level = level < 0 ? 0 : (level > 255 ? 255 : level);
   pinMode(pin, OUTPUT);
   if (pin == 16) {
-    const bool on = constrained_level >= 128;
+    constexpr uint32_t kSoftPwmPeriodUs = 5000;
+    if (constrained_level <= 0) {
+      digitalWrite(pin, NodeConfig::kLedActiveHigh ? LOW : HIGH);
+      return;
+    }
+    if (constrained_level >= 255) {
+      digitalWrite(pin, NodeConfig::kLedActiveHigh ? HIGH : LOW);
+      return;
+    }
+    uint32_t duty_us = (static_cast<uint32_t>(constrained_level) * kSoftPwmPeriodUs) / 255UL;
+    if (duty_us == 0) {
+      duty_us = 1;
+    }
+    const bool on = (micros() % kSoftPwmPeriodUs) < duty_us;
     digitalWrite(pin, NodeConfig::kLedActiveHigh ? (on ? HIGH : LOW) : (on ? LOW : HIGH));
     return;
   }
@@ -247,18 +262,26 @@ bool channel_auto_on(const ChannelState& channel) {
   return channel.has_relay ? channel.relay_on : false;
 }
 
+unsigned long required_touch_hold_confirm_ms(const ChannelState& channel) {
+  if (!channel.has_relay && strcmp(channel.key, "touch3") == 0) {
+    return remote_node02_relay_on ? kRemoteTouchTurnOffHoldConfirmMs : kRemoteTouchTurnOnHoldConfirmMs;
+  }
+  return kTouchHoldConfirmMs;
+}
+
 int touch_hold_led_level(const ChannelState& channel, unsigned long now_ms) {
   if (!channel.touch_armed || !channel.last_touch_raw || channel.touch_active) {
     return -1;
   }
 
   const bool currently_on = channel_auto_on(channel);
+  const unsigned long hold_confirm_ms = required_touch_hold_confirm_ms(channel);
   const unsigned long held_ms = now_ms - channel.last_touch_raw_change_ms;
-  if (held_ms >= kTouchHoldConfirmMs) {
+  if (held_ms >= hold_confirm_ms) {
     return currently_on ? 0 : 255;
   }
 
-  const int progress = static_cast<int>((held_ms * 255UL) / kTouchHoldConfirmMs);
+  const int progress = static_cast<int>((held_ms * 255UL) / hold_confirm_ms);
   if (currently_on) {
     const int level = 255 - progress;
     return level < 0 ? 0 : level;
@@ -707,7 +730,7 @@ void poll_touch_inputs() {
       if ((now - channel.last_touch_toggle_ms) < kTouchRetriggerGuardMs) {
         continue;
       }
-      if ((now - channel.last_touch_raw_change_ms) < kTouchHoldConfirmMs) {
+      if ((now - channel.last_touch_raw_change_ms) < required_touch_hold_confirm_ms(channel)) {
         continue;
       }
 
