@@ -805,10 +805,8 @@ function ModulePage({ page, alertFeed }) {
   const featuredDeviceCardRef = useRef(null);
   const roomNodeReconnectTimerRef = useRef(null);
   const roomNodeStatusTimerRef = useRef(null);
-  const roomNodeCardRef = useRef(null);
   const roomNodeSecondaryReconnectTimerRef = useRef(null);
   const roomNodeSecondaryStatusTimerRef = useRef(null);
-  const roomNodeSecondaryCardRef = useRef(null);
   const uploadInputRef = useRef(null);
   const sectionRefs = useRef({});
 
@@ -2459,20 +2457,6 @@ function ModulePage({ page, alertFeed }) {
         ? "Bridge error"
         : "Idle"
     : "Waiting for bridge";
-  const liveRoomNodeConnectivity = roomNodeState
-    ? roomNodeState.connected
-      ? "MQTT online"
-      : roomNodeState.lastError
-        ? "MQTT error"
-        : "Offline"
-    : "Waiting for node";
-  const liveRoomNodeSecondaryConnectivity = roomNodeSecondaryState
-    ? roomNodeSecondaryState.connected
-      ? "MQTT online"
-      : roomNodeSecondaryState.lastError
-        ? "MQTT error"
-        : "Offline"
-    : "Waiting for node";
   const aTravelSteps = (motionState.a?.travel && motionState.a.travel > 0)
     ? motionState.a.travel
     : (page.bridge?.bAxisTuning?.defaultATravelSteps ?? 0);
@@ -2501,8 +2485,6 @@ function ModulePage({ page, alertFeed }) {
   const showWorkspaceTab = hasAquariumTabs && activeModuleTab === "workspace";
   const showFeaturedDeviceTab = !page.featuredDevice || activeRoomDeviceTab === "featured";
   const showSwitchPanelTab = !page.featuredDevice || activeRoomDeviceTab === "switch-panel";
-  const showRoomNodeTab = !page.featuredDevice || activeRoomDeviceTab === "room-node";
-  const showRoomNodeSecondaryTab = !page.featuredDevice || activeRoomDeviceTab === "room-node-secondary";
   const currentAMm = (motionState.ab?.posA ?? motionState.a?.pos ?? 0) * aMmPerStep;
   const currentBMm = (motionState.ab?.posB ?? motionState.b?.pos ?? 0) * bMmPerStep;
   const liveTargetAMm = (motionState.ab?.targetA ?? motionState.a?.target ?? 0) * aMmPerStep;
@@ -3310,20 +3292,6 @@ function ModulePage({ page, alertFeed }) {
     featuredDeviceCardRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function focusRoomNode() {
-    if (!roomNodeCardRef.current) {
-      return;
-    }
-    roomNodeCardRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
-  function focusRoomNodeSecondary() {
-    if (!roomNodeSecondaryCardRef.current) {
-      return;
-    }
-    roomNodeSecondaryCardRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
   function focusPageSection(sectionId) {
     const element = sectionRefs.current[sectionId];
     if (!element) {
@@ -3918,7 +3886,7 @@ function ModulePage({ page, alertFeed }) {
         </section>
       )}
 
-      {page.featuredDevice || page.roomNode || page.roomNodeSecondary ? (
+      {page.featuredDevice || page.switchPanel ? (
         <section className="room-device-strip" aria-label="Room devices">
           {page.featuredDevice ? (
             <button
@@ -3944,28 +3912,6 @@ function ModulePage({ page, alertFeed }) {
               onClick={() => setActiveRoomDeviceTab("switch-panel")}
             >
               {renderStripIcon("control")}
-            </button>
-          ) : null}
-          {page.roomNode ? (
-            <button
-              className={`room-device-icon ${showRoomNodeTab ? "active" : ""}`}
-              type="button"
-              aria-label={page.roomNode.title}
-              title={page.roomNode.title}
-              onClick={() => setActiveRoomDeviceTab("room-node")}
-            >
-              {renderStripIcon("node")}
-            </button>
-          ) : null}
-          {page.roomNodeSecondary ? (
-            <button
-              className={`room-device-icon ${showRoomNodeSecondaryTab ? "active" : ""}`}
-              type="button"
-              aria-label={page.roomNodeSecondary.title}
-              title={page.roomNodeSecondary.title}
-              onClick={() => setActiveRoomDeviceTab("room-node-secondary")}
-            >
-              {renderStripIcon("node")}
             </button>
           ) : null}
         </section>
@@ -4623,7 +4569,7 @@ function ModulePage({ page, alertFeed }) {
         </>
       ) : null}
 
-      {!page.featuredDevice && (page.roomNode || page.roomNodeSecondary) ? (
+      {!page.featuredDevice && !hideRoomNodeCards && (page.roomNode || page.roomNodeSecondary) ? (
         <section className="tv-control-grid">
           {page.switchPanel ? renderSwitchPanelCard() : null}
           {page.roomNode ? (
