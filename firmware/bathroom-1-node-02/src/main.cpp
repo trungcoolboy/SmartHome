@@ -51,7 +51,8 @@ bool led_confirm_target_on = false;
 constexpr unsigned long kLocalControlGuardMs = 1500;
 constexpr unsigned long kMqttRetryBackoffMinMs = 2000;
 constexpr unsigned long kMqttRetryBackoffMaxMs = 30000;
-constexpr unsigned long kTouchHoldConfirmMs = 650;
+constexpr unsigned long kTouchTurnOnHoldConfirmMs = 3000;
+constexpr unsigned long kTouchTurnOffHoldConfirmMs = 650;
 constexpr unsigned long kTouchReleaseDebounceMs = 250;
 constexpr unsigned long kTouchRetriggerGuardMs = 1200;
 constexpr unsigned long kLedConfirmOffMs = 80;
@@ -179,17 +180,22 @@ bool read_touch_active() {
   return digitalRead(NodeConfig::kTouchPin) == (NodeConfig::kTouchActiveHigh ? HIGH : LOW);
 }
 
+unsigned long required_touch_hold_confirm_ms() {
+  return relay_on ? kTouchTurnOffHoldConfirmMs : kTouchTurnOnHoldConfirmMs;
+}
+
 int touch_hold_led_level(unsigned long now_ms) {
   if (!touch_armed || !last_touch_raw || touch_active) {
     return -1;
   }
 
+  const unsigned long hold_confirm_ms = required_touch_hold_confirm_ms();
   const unsigned long held_ms = now_ms - last_touch_raw_change_ms;
-  if (held_ms >= kTouchHoldConfirmMs) {
+  if (held_ms >= hold_confirm_ms) {
     return relay_on ? 0 : 255;
   }
 
-  const int progress = static_cast<int>((held_ms * 255UL) / kTouchHoldConfirmMs);
+  const int progress = static_cast<int>((held_ms * 255UL) / hold_confirm_ms);
   if (relay_on) {
     const int level = 255 - progress;
     return level < 0 ? 0 : level;
@@ -539,7 +545,7 @@ void poll_touch() {
     if ((now - last_touch_toggle_ms) < kTouchRetriggerGuardMs) {
       return;
     }
-    if ((now - last_touch_raw_change_ms) < kTouchHoldConfirmMs) {
+    if ((now - last_touch_raw_change_ms) < required_touch_hold_confirm_ms()) {
       return;
     }
 
