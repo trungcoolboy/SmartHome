@@ -8,6 +8,17 @@ import fptPlayIcon from "../assets/tv-apps/fptplay.ico";
 import vieonIcon from "../assets/tv-apps/vieon.ico";
 import vtvGoIcon from "../assets/tv-apps/vtvgo.ico";
 
+const SCHEDULE_WEEKDAYS = [
+  { key: 0, label: "Mon" },
+  { key: 1, label: "Tue" },
+  { key: 2, label: "Wed" },
+  { key: 3, label: "Thu" },
+  { key: 4, label: "Fri" },
+  { key: 5, label: "Sat" },
+  { key: 6, label: "Sun" },
+];
+const DEFAULT_SCHEDULE_DAYS = SCHEDULE_WEEKDAYS.map((day) => day.key);
+
 const SERVO_DIAL_START_DEG = -135;
 const SERVO_DIAL_END_DEG = 135;
 const SERVO_DIAL_SWEEP_DEG = SERVO_DIAL_END_DEG - SERVO_DIAL_START_DEG;
@@ -779,6 +790,9 @@ function ModulePage({ page, alertFeed }) {
   const [roomNodeError, setRoomNodeError] = useState("");
   const [roomNodeSecondaryState, setRoomNodeSecondaryState] = useState(null);
   const [roomNodeSecondaryError, setRoomNodeSecondaryError] = useState("");
+  const [switchSchedules, setSwitchSchedules] = useState([]);
+  const [switchScheduleDrafts, setSwitchScheduleDrafts] = useState({});
+  const [switchScheduleError, setSwitchScheduleError] = useState("");
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
@@ -2319,6 +2333,42 @@ function ModulePage({ page, alertFeed }) {
   }, [page.roomNodeSecondary?.apiPath]);
 
   useEffect(() => {
+    if (!page.switchPanel) {
+      setSwitchSchedules([]);
+      setSwitchScheduleDrafts({});
+      setSwitchScheduleError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadSwitchSchedules() {
+      try {
+        const response = await fetch(getApiBaseUrl("/api/schedules"));
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `schedules ${response.status}`);
+        }
+        if (!cancelled) {
+          setSwitchSchedules(payload.items ?? []);
+          setSwitchScheduleError("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSwitchScheduleError(error.message);
+        }
+      }
+    }
+
+    loadSwitchSchedules();
+    const timer = window.setInterval(loadSwitchSchedules, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [page.switchPanel, page.roomNode?.apiPath, page.roomNodeSecondary?.apiPath]);
+
+  useEffect(() => {
     const baseUrl = getUploadBaseUrl();
     if (!baseUrl) {
       setUploadItems([]);
@@ -3483,6 +3533,166 @@ function ModulePage({ page, alertFeed }) {
     );
   }
 
+  function getSwitchNodeApiPath(nodeKind) {
+    return nodeKind === "primary" ? page.roomNode?.apiPath : page.roomNodeSecondary?.apiPath;
+  }
+
+  function getSwitchScheduleTarget(item) {
+    const nodeKind = item.commandNodeKind ?? item.nodeKind;
+    return {
+      routePrefix: getSwitchNodeApiPath(nodeKind) ?? "",
+      channel: item.relayCommandKey ?? item.relayKey,
+      commandType: item.commandType ?? "relay",
+    };
+  }
+
+  function getSwitchScheduleKey(item) {
+    const target = getSwitchScheduleTarget(item);
+    return `${target.routePrefix}|${target.channel}|${target.commandType}`;
+  }
+
+  function getSwitchDraft(itemId) {
+    return switchScheduleDrafts[itemId] ?? {
+      timeOfDay: "",
+      targetState: true,
+      days: DEFAULT_SCHEDULE_DAYS,
+    };
+  }
+
+  function updateSwitchDraft(itemId, patch) {
+    setSwitchScheduleDrafts((current) => ({
+      ...current,
+      [itemId]: {
+        ...(current[itemId] ?? {
+          timeOfDay: "",
+          targetState: true,
+          days: DEFAULT_SCHEDULE_DAYS,
+        }),
+        ...patch,
+      },
+    }));
+  }
+
+  function toggleSwitchDraftDay(itemId, dayKey) {
+    const draft = getSwitchDraft(itemId);
+    const daySet = new Set(draft.days ?? DEFAULT_SCHEDULE_DAYS);
+    if (daySet.has(dayKey)) {
+      daySet.delete(dayKey);
+    } else {
+      daySet.add(dayKey);
+    }
+    updateSwitchDraft(itemId, {
+      days: daySet.size ? Array.from(daySet).sort((a, b) => a - b) : [dayKey],
+    });
+  }
+
+  function schedulesForSwitch(item) {
+    const targetKey = getSwitchScheduleKey(item);
+    return switchSchedules.filter((schedule) => (
+      `${schedule.routePrefix}|${schedule.channel}|${schedule.commandType}` === targetKey
+    ));
+  }
+
+  function formatScheduleDays(days) {
+    const normalized = [...(days ?? [])].sort((a, b) => a - b);
+    if (normalized.length === 7) {
+      return "Every day";
+    }
+    if (normalized.join(",") === "0,1,2,3,4") {
+      return "Weekdays";
+    }
+    if (normalized.join(",") === "5,6") {
+      return "Weekend";
+    }
+    return normalized
+      .map((day) => SCHEDULE_WEEKDAYS.find((item) => item.key === day)?.label)
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  async function createSwitchSchedule(item) {
+    const draft = getSwitchDraft(item.id);
+    const target = getSwitchScheduleTarget(item);
+    if (!target.routePrefix) {
+      setSwitchScheduleError("missing node API path");
+      return;
+    }
+    if (!draft.timeOfDay) {
+      setSwitchScheduleError("choose a time first");
+      return;
+    }
+
+    try {
+      const response = await fetch(getApiBaseUrl("/api/schedules"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          label: item.label,
+          routePrefix: target.routePrefix,
+          channel: target.channel,
+          commandType: target.commandType,
+          targetState: draft.targetState,
+          timeOfDay: draft.timeOfDay,
+          days: draft.days ?? DEFAULT_SCHEDULE_DAYS,
+          timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+          timezoneName: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `schedule ${response.status}`);
+      }
+      setSwitchSchedules(payload.items ?? []);
+      setSwitchScheduleDrafts((current) => ({
+        ...current,
+        [item.id]: {
+          ...(current[item.id] ?? {}),
+          timeOfDay: "",
+        },
+      }));
+      setSwitchScheduleError("");
+    } catch (error) {
+      setSwitchScheduleError(error.message);
+    }
+  }
+
+  async function setScheduleEnabled(scheduleId, enabled) {
+    try {
+      const response = await fetch(getApiBaseUrl("/api/schedules"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set_enabled", id: scheduleId, enabled }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `schedule ${response.status}`);
+      }
+      setSwitchSchedules(payload.items ?? []);
+      setSwitchScheduleError("");
+    } catch (error) {
+      setSwitchScheduleError(error.message);
+    }
+  }
+
+  async function deleteSwitchSchedule(scheduleId) {
+    try {
+      const response = await fetch(getApiBaseUrl("/api/schedules"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", id: scheduleId }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `schedule ${response.status}`);
+      }
+      setSwitchSchedules(payload.items ?? []);
+      setSwitchScheduleError("");
+    } catch (error) {
+      setSwitchScheduleError(error.message);
+    }
+  }
+
   async function setSwitchRelay(nodeKind, relayKey, nextValue, commandType = "relay") {
     if (commandType === "remote") {
       await sendRoomNodeSecondaryCommand({
@@ -3633,7 +3843,10 @@ function ModulePage({ page, alertFeed }) {
       <article className="tv-control-card">
         <span className="eyebrow">{page.switchPanel.title}</span>
         <div className="switch-panel-list">
-          {roomSwitchItems.map((item) => (
+          {roomSwitchItems.map((item) => {
+            const draft = getSwitchDraft(item.id);
+            const itemSchedules = schedulesForSwitch(item);
+            return (
             <div key={item.id} className="switch-panel-row">
               <div className="switch-panel-meta">
                 <strong>{item.label}</strong>
@@ -3709,12 +3922,82 @@ function ModulePage({ page, alertFeed }) {
                       >
                         {mode.label}
                       </button>
-                    ))}
+                  ))}
                 </div>
               ) : null}
+              <div className="switch-scheduler">
+                <div className="switch-scheduler-form">
+                  <input
+                    type="time"
+                    value={draft.timeOfDay}
+                    onChange={(event) => updateSwitchDraft(item.id, { timeOfDay: event.target.value })}
+                    aria-label={`${item.label} schedule time`}
+                  />
+                  <select
+                    value={draft.targetState ? "on" : "off"}
+                    onChange={(event) => updateSwitchDraft(item.id, { targetState: event.target.value === "on" })}
+                    aria-label={`${item.label} schedule action`}
+                  >
+                    <option value="on">On</option>
+                    <option value="off">Off</option>
+                  </select>
+                  <button
+                    className="ghost-pill"
+                    type="button"
+                    onClick={() => createSwitchSchedule(item)}
+                  >
+                    Add
+                  </button>
+                </div>
+                <div className="switch-scheduler-days">
+                  {SCHEDULE_WEEKDAYS.map((day) => (
+                    <button
+                      key={`${item.id}-schedule-day-${day.key}`}
+                      className={(draft.days ?? DEFAULT_SCHEDULE_DAYS).includes(day.key) ? "active" : ""}
+                      type="button"
+                      onClick={() => toggleSwitchDraftDay(item.id, day.key)}
+                    >
+                      {day.label}
+                    </button>
+                  ))}
+                </div>
+                {itemSchedules.length ? (
+                  <div className="switch-scheduler-list">
+                    {itemSchedules.map((schedule) => (
+                      <div key={schedule.id} className="switch-scheduler-item">
+                        <label className={`ios-toggle ios-toggle-small ${schedule.enabled ? "is-on" : ""}`}>
+                          <input
+                            type="checkbox"
+                            checked={schedule.enabled}
+                            onChange={(event) => setScheduleEnabled(schedule.id, event.target.checked)}
+                          />
+                          <span className="ios-toggle-track" />
+                        </label>
+                        <span>
+                          <strong>{schedule.timeOfDay}</strong>
+                          {" "}
+                          {schedule.targetState ? "On" : "Off"}
+                          {" "}
+                          <small>{formatScheduleDays(schedule.days)}</small>
+                        </span>
+                        <button
+                          className="switch-scheduler-delete"
+                          type="button"
+                          onClick={() => deleteSwitchSchedule(schedule.id)}
+                          aria-label={`Delete ${item.label} schedule`}
+                        >
+                          x
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
-          ))}
+            );
+          })}
         </div>
+        {switchScheduleError ? <p className="switch-scheduler-error">{switchScheduleError}</p> : null}
       </article>
     );
   }

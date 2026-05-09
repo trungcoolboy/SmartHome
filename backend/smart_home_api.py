@@ -1700,6 +1700,7 @@ def main() -> int:
     socket.setdefaulttimeout(15)
     stop_event = threading.Event()
     event_store = EventStore(args.event_db_path, retention_days=args.event_retention_days)
+    schedule_store = ScheduleStore(args.event_db_path)
 
     def _shutdown(signum: int, frame: Any) -> None:
         del signum, frame
@@ -1721,6 +1722,8 @@ def main() -> int:
 
     stm32_runtimes = build_stm32_runtimes(args, stop_event, event_store=event_store)
     room_node_runtimes = build_room_node_runtimes(args, stop_event, event_store=event_store)
+    relay_scheduler = RelayScheduler(schedule_store, room_node_runtimes, stop_event, event_store=event_store)
+    relay_scheduler.start()
 
     Handler.tv_bridge = tv_bridge
     Handler.tv_state = tv_state
@@ -1728,6 +1731,7 @@ def main() -> int:
     Handler.stm32_runtimes = stm32_runtimes
     Handler.room_node_runtimes = room_node_runtimes
     Handler.event_store = event_store
+    Handler.schedule_store = schedule_store
     Handler.upload_dir = Path(args.upload_dir)
 
     server = SmartHomeApiServer((args.host, args.port), Handler)
@@ -1741,6 +1745,7 @@ def main() -> int:
             runtime.stop()
         for runtime in stm32_runtimes.values():
             runtime.bridge.stop()
+        schedule_store.close()
         event_store.close()
     return 0
 

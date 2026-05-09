@@ -539,6 +539,97 @@ button {
   outline-offset: 2px;
 }
 
+.switch-scheduler {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.switch-scheduler-form {
+  display: grid;
+  grid-template-columns: minmax(110px, 150px) minmax(86px, 110px) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.switch-scheduler-form input,
+.switch-scheduler-form select {
+  min-height: 38px;
+  border: 1px solid rgba(160, 216, 238, 0.16);
+  border-radius: 12px;
+  background: rgba(7, 12, 20, 0.62);
+  color: var(--text);
+  padding: 0 12px;
+}
+
+.switch-scheduler-form .ghost-pill {
+  min-height: 38px;
+  padding: 0 16px;
+}
+
+.switch-scheduler-days,
+.switch-scheduler-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.switch-scheduler-days button {
+  min-width: 46px;
+  border: 1px solid rgba(160, 216, 238, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  padding: 7px 10px;
+}
+
+.switch-scheduler-days button.active {
+  border-color: rgba(61, 220, 151, 0.55);
+  background: rgba(61, 220, 151, 0.14);
+  color: #dffcf0;
+}
+
+.switch-scheduler-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  border: 1px solid rgba(160, 216, 238, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 5px 8px 5px 6px;
+}
+
+.switch-scheduler-item span {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.switch-scheduler-item small {
+  color: var(--text-muted);
+}
+
+.switch-scheduler-delete {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.switch-scheduler-delete:hover {
+  background: rgba(255, 77, 79, 0.18);
+  color: #ffd8d8;
+}
+
+.switch-scheduler-error {
+  margin: 12px 0 0;
+  color: #ffb4b4;
+  font-size: 0.9rem;
+}
+
 .switch-led-indicator.switch-led-mode-off {
   background: rgba(255, 255, 255, 0.12);
 }
@@ -4303,6 +4394,10 @@ button {
     white-space: normal;
   }
 
+  .switch-scheduler-form {
+    grid-template-columns: minmax(0, 1fr) minmax(82px, 0.65fr) auto;
+  }
+
   .ab-workspace-stats-panel,
   .ab-workspace-controls-panel {
     position: static !important;
@@ -4459,6 +4554,14 @@ button {
   .switch-mode-segment {
     max-width: 100%;
     justify-self: stretch;
+  }
+
+  .switch-scheduler-form {
+    grid-template-columns: 1fr;
+  }
+
+  .switch-scheduler-form .ghost-pill {
+    width: 100%;
   }
 
   .tv-app-grid,
