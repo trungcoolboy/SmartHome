@@ -797,6 +797,7 @@ function ModulePage({ page, alertFeed }) {
   const [alarmDraft, setAlarmDraft] = useState({
     timeOfDay: "",
     durationSeconds: 30,
+    pattern: "normal",
     lightOn: false,
     days: DEFAULT_SCHEDULE_DAYS,
   });
@@ -3781,6 +3782,7 @@ function ModulePage({ page, alertFeed }) {
           routePrefix: page.alarmPanel.nodeApiPath,
           durationMs: Math.min(durationSeconds, 600) * 1000,
           lightOn: Boolean(alarmDraft.lightOn),
+          pattern: alarmDraft.pattern ?? "normal",
           timeOfDay: alarmDraft.timeOfDay,
           days: alarmDraft.days ?? DEFAULT_SCHEDULE_DAYS,
           timezoneOffsetMinutes: new Date().getTimezoneOffset(),
@@ -3855,6 +3857,7 @@ function ModulePage({ page, alertFeed }) {
           routePrefix: page.alarmPanel.nodeApiPath,
           durationMs: Math.min(Math.max(durationSeconds || 1, 1), 600) * 1000,
           lightOn: Boolean(alarmDraft.lightOn),
+          pattern: alarmDraft.pattern ?? "normal",
         }),
       });
       const payload = await response.json();
@@ -4224,6 +4227,17 @@ function ModulePage({ page, alertFeed }) {
               onChange={(event) => setAlarmDraft((current) => ({ ...current, durationSeconds: event.target.value }))}
             />
           </label>
+          <label className="alarm-duration-field">
+            <span>Beep</span>
+            <select
+              value={alarmDraft.pattern ?? "normal"}
+              onChange={(event) => setAlarmDraft((current) => ({ ...current, pattern: event.target.value }))}
+            >
+              <option value="soft">Soft</option>
+              <option value="normal">Normal</option>
+              <option value="strong">Strong</option>
+            </select>
+          </label>
           <label className="alarm-light-toggle">
             <input
               type="checkbox"
@@ -4270,6 +4284,8 @@ function ModulePage({ page, alertFeed }) {
                   <strong>{alarm.timeOfDay}</strong>
                   {" "}
                   {Math.round((alarm.durationMs ?? 0) / 1000)}s
+                  {" "}
+                  {String(alarm.pattern ?? "normal").replace(/^./, (letter) => letter.toUpperCase())}
                   {alarm.lightOn ? " Light" : ""}
                   {" "}
                   <small>{formatScheduleDays(alarm.days)}</small>
@@ -4962,7 +4978,7 @@ function ModulePage({ page, alertFeed }) {
                               <td>{index + 1}</td>
                               <td>{payload.title ?? payload.appId ?? "Unknown"}</td>
                               <td>{formatDateTime(payload.startedAt)}</td>
-                              <td>{formatDateTime(payload.endedAt)}</td>
+                              <td>{payload.active ? "Running" : formatDateTime(payload.endedAt)}</td>
                               <td>{formatDurationMinutes(payload.durationSeconds)} min</td>
                             </tr>
                           );

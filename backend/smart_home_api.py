@@ -381,6 +381,7 @@ class RelayScheduler:
                 "action": "buzz",
                 "durationMs": int(alarm["durationMs"]),
                 "lightOn": bool(alarm.get("lightOn")),
+                "pattern": str(alarm.get("pattern") or "normal"),
             }
             self.schedule_store.mark_alarm_run(alarm_id, run_key)
             runtime.send_command(payload)
@@ -396,6 +397,7 @@ class RelayScheduler:
                         "label": alarm.get("label"),
                         "durationMs": alarm.get("durationMs"),
                         "lightOn": alarm.get("lightOn"),
+                        "pattern": alarm.get("pattern"),
                         "payload": payload,
                     },
                 )
@@ -439,6 +441,33 @@ def build_tv_apps_snapshot(state: TvState) -> dict[str, Any]:
     }
 
 
+def normalize_tv_app_session_payload(payload: Any, fallback_ts: float | None = None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    normalized = dict(payload)
+    app_id = normalized.get("appId")
+    title = normalized.get("title") or normalized.get("app") or app_id or "Unknown"
+    normalized["title"] = str(title)
+    normalized["app"] = str(title)
+    if app_id is not None:
+        normalized["appId"] = str(app_id)
+
+    started_at = normalized.get("startedAt")
+    ended_at = normalized.get("endedAt")
+    if started_at is None and fallback_ts is not None:
+        started_at = fallback_ts
+        normalized["startedAt"] = fallback_ts
+
+    if normalized.get("durationSeconds") is None and started_at is not None and ended_at is not None:
+        try:
+            normalized["durationSeconds"] = max(0.0, float(ended_at) - float(started_at))
+        except (TypeError, ValueError):
+            normalized["durationSeconds"] = 0.0
+
+    return normalized
+
+
 def build_tv_app_history(event_store: EventStore, state: TvState, limit: int = 20) -> dict[str, Any]:
     items = event_store.recent_events(
         limit=limit,
@@ -446,7 +475,48 @@ def build_tv_app_history(event_store: EventStore, state: TvState, limit: int = 2
         source_id=state.tv_id,
         event_type="app_session",
     )
-    return {"tvId": state.tv_id, "items": items}
+    normalized_items: list[dict[str, Any]] = []
+    for item in items:
+        payload = normalize_tv_app_session_payload(item.get("payloadJson"), item.get("ts"))
+        if payload is None:
+            normalized_items.append(item)
+            continue
+        normalized_item = dict(item)
+        normalized_item["payloadJson"] = payload
+        normalized_items.append(normalized_item)
+
+    snapshot = build_tv_snapshot(state)
+    app_id = snapshot.get("foregroundAppId")
+    title = snapshot.get("foregroundAppTitle") or app_id
+    started_at = snapshot.get("foregroundAppStartedAt")
+    if snapshot.get("reachable") and app_id and started_at:
+        now = time.time()
+        normalized_items.insert(
+            0,
+            {
+                "id": f"active-{state.tv_id}",
+                "ts": now,
+                "sourceType": "tv",
+                "sourceId": state.tv_id,
+                "eventType": "app_session",
+                "direction": None,
+                "topic": None,
+                "payloadText": None,
+                "payloadJson": {
+                    "appId": str(app_id),
+                    "title": str(title),
+                    "app": str(title),
+                    "startedAt": float(started_at),
+                    "endedAt": None,
+                    "durationSeconds": max(0.0, now - float(started_at)),
+                    "active": True,
+                },
+                "state": None,
+                "metadata": {"synthetic": True},
+            },
+        )
+
+    return {"tvId": state.tv_id, "items": normalized_items[:limit]}
 
 
 def start_temperature_sample_logger(
@@ -522,14 +592,23 @@ def start_integrated_tv_probe_loop(
         if previous_id and previous_started_at and (
             previous_id != current_id or (previous_reachable and not current_reachable)
         ):
+            try:
+                started_at = float(previous_started_at)
+                duration_seconds = max(0.0, now - started_at)
+            except (TypeError, ValueError):
+                started_at = now
+                duration_seconds = 0.0
             event_store.record(
                 source_type="tv",
                 source_id=state.tv_id,
                 event_type="app_session",
                 payload_json={
+                    "appId": str(previous_id),
+                    "title": str(previous_title),
                     "app": previous_title,
-                    "startedAt": previous_started_at,
+                    "startedAt": started_at,
                     "endedAt": now,
+                    "durationSeconds": duration_seconds,
                 },
             )
 
@@ -870,6 +949,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "buzz",
                         "durationMs": duration_ms,
                         "lightOn": bool(body.get("lightOn")),
+                        "pattern": str(body.get("pattern") or "normal"),
                     }
                 runtime.send_command(payload)
                 self._json(HTTPStatus.OK, {"ok": True, "sent": payload, "state": runtime.state.snapshot()})
@@ -889,6 +969,7 @@ class Handler(BaseHTTPRequestHandler):
                 node_id=runtime.state.node_id,
                 duration_ms=int(body.get("durationMs", 30000)),
                 light_on=bool(body.get("lightOn")),
+                pattern=str(body.get("pattern") or "normal"),
                 time_of_day=str(body["timeOfDay"]),
                 days=[int(day) for day in body.get("days", [0, 1, 2, 3, 4, 5, 6])],
                 timezone_offset_minutes=int(body.get("timezoneOffsetMinutes", 0)),

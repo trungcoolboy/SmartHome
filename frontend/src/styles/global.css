@@ -641,14 +641,15 @@ button {
 
 .alarm-panel-form {
   display: grid;
-  grid-template-columns: minmax(112px, 1fr) minmax(104px, 132px) max-content max-content max-content max-content;
+  grid-template-columns: minmax(112px, 1fr) minmax(104px, 132px) minmax(104px, 132px) max-content max-content max-content max-content;
   align-items: end;
   gap: 10px;
   margin-top: 12px;
 }
 
 .alarm-panel-form input[type="time"],
-.alarm-panel-form input[type="number"] {
+.alarm-panel-form input[type="number"],
+.alarm-panel-form select {
   min-height: 38px;
   border: 1px solid rgba(160, 216, 238, 0.16);
   border-radius: 12px;
@@ -4516,7 +4517,7 @@ button {
   }
 
   .alarm-panel-form {
-    grid-template-columns: minmax(0, 1fr) minmax(96px, 0.65fr) max-content max-content max-content max-content;
+    grid-template-columns: minmax(0, 1fr) minmax(96px, 0.65fr) minmax(104px, 0.7fr) max-content max-content max-content max-content;
   }
 
   .ab-workspace-stats-panel,

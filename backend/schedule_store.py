@@ -56,6 +56,7 @@ class ScheduleStore:
                     node_id TEXT NOT NULL,
                     duration_ms INTEGER NOT NULL DEFAULT 30000,
                     light_on INTEGER NOT NULL DEFAULT 0,
+                    pattern TEXT NOT NULL DEFAULT 'normal',
                     time_of_day TEXT NOT NULL,
                     days_json TEXT NOT NULL,
                     timezone_offset_minutes INTEGER NOT NULL DEFAULT 0,
@@ -73,6 +74,7 @@ class ScheduleStore:
                 """
             )
             self._ensure_column_locked("alarm_schedules", "light_on", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column_locked("alarm_schedules", "pattern", "TEXT NOT NULL DEFAULT 'normal'")
             self.conn.commit()
 
     def _ensure_column_locked(self, table: str, column: str, definition: str) -> None:
@@ -229,6 +231,7 @@ class ScheduleStore:
         node_id: str,
         duration_ms: int,
         light_on: bool,
+        pattern: str,
         time_of_day: str,
         days: list[int],
         timezone_offset_minutes: int,
@@ -238,14 +241,15 @@ class ScheduleStore:
         normalized_time = self._normalize_time_of_day(time_of_day)
         normalized_days = self._normalize_days(days)
         normalized_duration_ms = max(1000, min(600000, int(duration_ms)))
+        normalized_pattern = self._normalize_alarm_pattern(pattern)
         now = time.time()
         with self.lock:
             cursor = self.conn.execute(
                 """
                 INSERT INTO alarm_schedules (
-                    enabled, label, route_prefix, node_id, duration_ms, light_on, time_of_day,
+                    enabled, label, route_prefix, node_id, duration_ms, light_on, pattern, time_of_day,
                     days_json, timezone_offset_minutes, timezone_name, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     1 if enabled else 0,
@@ -254,6 +258,7 @@ class ScheduleStore:
                     node_id,
                     normalized_duration_ms,
                     1 if light_on else 0,
+                    normalized_pattern,
                     normalized_time,
                     json.dumps(normalized_days, ensure_ascii=True),
                     int(timezone_offset_minutes),
@@ -347,6 +352,13 @@ class ScheduleStore:
         return normalized
 
     @staticmethod
+    def _normalize_alarm_pattern(pattern: str) -> str:
+        normalized = str(pattern or "normal").strip().lower()
+        if normalized not in {"soft", "normal", "strong"}:
+            raise ValueError("pattern must be soft, normal, or strong")
+        return normalized
+
+    @staticmethod
     def _row_to_schedule(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
@@ -378,6 +390,7 @@ class ScheduleStore:
             "nodeId": row["node_id"],
             "durationMs": row["duration_ms"],
             "lightOn": bool(row["light_on"]),
+            "pattern": row["pattern"],
             "timeOfDay": row["time_of_day"],
             "days": json.loads(row["days_json"]),
             "timezoneOffsetMinutes": row["timezone_offset_minutes"],

@@ -154,6 +154,28 @@ bool parse_led_mode(const char* value, LedMode& mode) {
   return false;
 }
 
+BuzzerPattern parse_buzzer_pattern(const char* value) {
+  if (strcmp(value, "soft") == 0) {
+    return BuzzerPattern::Soft;
+  }
+  if (strcmp(value, "strong") == 0) {
+    return BuzzerPattern::Strong;
+  }
+  return BuzzerPattern::Normal;
+}
+
+const char* buzzer_pattern_name(BuzzerPattern pattern) {
+  switch (pattern) {
+    case BuzzerPattern::Soft:
+      return "soft";
+    case BuzzerPattern::Strong:
+      return "strong";
+    case BuzzerPattern::Normal:
+    default:
+      return "normal";
+  }
+}
+
 int current_led_level(bool breath_window) {
   const unsigned long now_ms = millis();
   switch (led_mode) {
@@ -250,18 +272,41 @@ void write_buzzer(bool active) {
   digitalWrite(NodeConfig::kBuzzerPin, as_output_level(active, NodeConfig::kBuzzerActiveHigh) ? HIGH : LOW);
 }
 
-void pulse_buzzer(unsigned long duration_ms) {
+unsigned long buzzer_phase_duration_ms() {
+  if (buzzer_active_pattern == BuzzerPattern::Soft) {
+    return buzzer_output_on ? kBuzzerSoftOnMs : kBuzzerSoftOffMs;
+  }
+  if (buzzer_active_pattern == BuzzerPattern::Strong) {
+    return kBuzzerStrongPhaseMs[buzzer_phase % 4];
+  }
+  return buzzer_output_on ? kBuzzerNormalOnMs : kBuzzerNormalOffMs;
+}
+
+void advance_buzzer_phase() {
+  if (buzzer_active_pattern == BuzzerPattern::Strong) {
+    buzzer_phase = (buzzer_phase + 1) % 4;
+    buzzer_output_on = buzzer_phase == 0 || buzzer_phase == 2;
+    return;
+  }
+  buzzer_output_on = !buzzer_output_on;
+}
+
+void pulse_buzzer(unsigned long duration_ms, BuzzerPattern pattern) {
   const unsigned long now = millis();
   buzzer_active = true;
+  buzzer_active_pattern = pattern;
+  buzzer_pattern = pattern;
+  buzzer_phase = 0;
   buzzer_output_on = true;
   buzzer_until_ms = now + duration_ms;
-  buzzer_next_toggle_ms = now + kBuzzerBeepOnMs;
+  buzzer_next_toggle_ms = now + buzzer_phase_duration_ms();
   write_buzzer(true);
 }
 
 void stop_buzzer() {
   buzzer_active = false;
   buzzer_output_on = false;
+  buzzer_phase = 0;
   buzzer_until_ms = 0;
   buzzer_next_toggle_ms = 0;
   write_buzzer(false);
@@ -277,8 +322,8 @@ void update_buzzer() {
     return;
   }
   if (static_cast<long>(now - buzzer_next_toggle_ms) >= 0) {
-    buzzer_output_on = !buzzer_output_on;
-    buzzer_next_toggle_ms = now + (buzzer_output_on ? kBuzzerBeepOnMs : kBuzzerBeepOffMs);
+    advance_buzzer_phase();
+    buzzer_next_toggle_ms = now + buzzer_phase_duration_ms();
     write_buzzer(buzzer_output_on);
   }
 }
@@ -340,6 +385,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["touch"] = touch_active;
   doc["ledMode"] = led_mode_name(led_mode);
   doc["buzzer"] = buzzer_active;
+  doc["buzzerPattern"] = buzzer_pattern_name(buzzer_pattern);
 
   char payload[256];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
@@ -361,6 +407,7 @@ bool publish_telemetry_now() {
   doc["touch"] = touch_active;
   doc["ledMode"] = led_mode_name(led_mode);
   doc["buzzer"] = buzzer_active;
+  doc["buzzerPattern"] = buzzer_pattern_name(buzzer_pattern);
 
   char payload[256];
   const size_t len = serializeJson(doc, payload, sizeof(payload));
@@ -454,12 +501,13 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(action, "buzz") == 0) {
     const unsigned long duration_ms = doc["durationMs"] | 120UL;
+    const char* pattern = doc["pattern"] | "normal";
     if (doc["lightOn"] | false) {
       set_relay(true, "alarm_light_on");
     }
-    pulse_buzzer(duration_ms);
+    pulse_buzzer(duration_ms, parse_buzzer_pattern(pattern));
     telemetry_dirty = true;
-    queue_state("buzz", nullptr);
+    queue_state("buzz", pattern);
     return;
   }
 
