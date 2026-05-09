@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SmartHome USB backup at 23:55 Vietnam time
+
+[Timer]
+OnCalendar=*-*-* 16:55:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+Unit=smarthome-usb-backup.service
+
+[Install]
+WantedBy=timers.target

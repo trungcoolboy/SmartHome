@@ -1,0 +1,12 @@
+[Unit]
+Description=SmartHome USB backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/smarthome-usb-backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=append:/var/log/smarthome-usb-backup.log
+StandardError=append:/var/log/smarthome-usb-backup.log
