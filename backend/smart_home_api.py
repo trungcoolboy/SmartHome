@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from event_store import EventStore
+from schedule_store import ScheduleStore
 from stm32_bridge import BridgeState, SerialBridge, SseHub as SerialSseHub, start_publisher
 from webos_tv_bridge import SseHub as TvSseHub
 from webos_tv_bridge import TvState, WebOsTvBridge, start_command_worker
@@ -292,6 +293,79 @@ class RoomNodeRuntime:
                     time.sleep(1)
 
 
+class RelayScheduler:
+    def __init__(
+        self,
+        schedule_store: ScheduleStore,
+        room_node_runtimes: dict[str, RoomNodeRuntime],
+        stop_event: threading.Event,
+        event_store: EventStore | None = None,
+    ) -> None:
+        self.schedule_store = schedule_store
+        self.room_node_runtimes = room_node_runtimes
+        self.stop_event = stop_event
+        self.event_store = event_store
+        self.thread = threading.Thread(target=self._run, name="relay-scheduler", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            for schedule in self.schedule_store.due_schedules():
+                self._execute_schedule(schedule)
+            self.stop_event.wait(5)
+
+    def _execute_schedule(self, schedule: dict[str, Any]) -> None:
+        run_key = str(schedule.get("runKey") or "")
+        schedule_id = int(schedule["id"])
+        try:
+            runtime = self.room_node_runtimes.get(str(schedule["routePrefix"]))
+            if runtime is None:
+                raise RuntimeError(f"node route not found: {schedule['routePrefix']}")
+
+            target_state = bool(schedule["targetState"])
+            command_type = str(schedule.get("commandType") or "relay")
+            channel = str(schedule["channel"])
+            if command_type == "remote":
+                current_state = runtime.state.snapshot().get("remoteRelay")
+                if current_state is not None and bool(current_state) == target_state:
+                    self.schedule_store.mark_run(schedule_id, run_key)
+                    return
+                payload = {"action": "toggle_remote"}
+            else:
+                payload = {"action": "set_relay", "channel": channel, "value": target_state}
+
+            self.schedule_store.mark_run(schedule_id, run_key)
+            runtime.send_command(payload)
+            if self.event_store is not None:
+                self.event_store.record(
+                    source_type="scheduler",
+                    source_id=str(schedule["nodeId"]),
+                    event_type="relay_command",
+                    direction="tx",
+                    topic=runtime.command_topic,
+                    payload_json={
+                        "scheduleId": schedule_id,
+                        "label": schedule.get("label"),
+                        "channel": channel,
+                        "commandType": command_type,
+                        "state": "on" if target_state else "off",
+                        "payload": payload,
+                    },
+                )
+        except Exception as exc:
+            self.schedule_store.mark_run(schedule_id, run_key, error=str(exc))
+            if self.event_store is not None:
+                self.event_store.record(
+                    source_type="scheduler",
+                    source_id=str(schedule.get("nodeId") or "unknown"),
+                    event_type="scheduler_error",
+                    direction="tx",
+                    payload_json={"scheduleId": schedule_id, "error": str(exc)},
+                )
+
+
 class SmartHomeApiServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
@@ -488,6 +562,7 @@ class Handler(BaseHTTPRequestHandler):
     stm32_runtimes: dict[str, Stm32Runtime] = {}
     room_node_runtimes: dict[str, RoomNodeRuntime] = {}
     event_store: EventStore | None = None
+    schedule_store: ScheduleStore | None = None
     upload_dir: Path = Path("/tmp")
     stm32_status_cache_ttl_seconds = 0.5
     stm32_logs_cache_ttl_seconds = 0.75
@@ -525,6 +600,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/uploads":
             self._uploads()
+            return
+        if parsed.path == "/api/schedules":
+            self._schedules(parsed)
             return
 
         if parsed.path.startswith(TV_ROUTE_PREFIX):
@@ -611,6 +689,85 @@ class Handler(BaseHTTPRequestHandler):
         if self.event_store is None:
             raise RuntimeError("Event store is not configured")
         return self.event_store
+
+    def _require_schedule_store(self) -> ScheduleStore:
+        if self.schedule_store is None:
+            raise RuntimeError("Schedule store is not configured")
+        return self.schedule_store
+
+    def _schedules(self, parsed: Any) -> None:
+        store = self._require_schedule_store()
+        if self.command == "GET":
+            params = parse_qs(parsed.query)
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "items": store.list_schedules(
+                        route_prefix=params.get("route_prefix", [None])[0],
+                        channel=params.get("channel", [None])[0],
+                        command_type=params.get("command_type", [None])[0],
+                    ),
+                    "serverTime": time.time(),
+                },
+            )
+            return
+
+        if self.command != "POST":
+            self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "expected JSON body"})
+            return
+
+        action = str(body.get("action") or "create")
+        try:
+            if action == "delete":
+                deleted = store.delete_schedule(int(body["id"]))
+                self._json(HTTPStatus.OK, {"ok": deleted, "items": store.list_schedules()})
+                return
+            if action == "set_enabled":
+                item = store.set_enabled(int(body["id"]), bool(body.get("enabled")))
+                if item is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "schedule not found"})
+                    return
+                self._json(HTTPStatus.OK, {"ok": True, "item": item, "items": store.list_schedules()})
+                return
+            if action != "create":
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown schedule action"})
+                return
+
+            route_prefix = str(body["routePrefix"])
+            runtime = self.room_node_runtimes.get(route_prefix)
+            if runtime is None:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": f"unknown node route: {route_prefix}"})
+                return
+            command_type = str(body.get("commandType") or "relay")
+            if command_type not in {"relay", "remote"}:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "commandType must be relay or remote"})
+                return
+            item = store.create_schedule(
+                label=str(body.get("label") or body.get("channel") or "Switch"),
+                route_prefix=route_prefix,
+                node_id=runtime.state.node_id,
+                channel=str(body["channel"]),
+                command_type=command_type,
+                target_state=bool(body.get("targetState")),
+                time_of_day=str(body["timeOfDay"]),
+                days=[int(day) for day in body.get("days", [0, 1, 2, 3, 4, 5, 6])],
+                timezone_offset_minutes=int(body.get("timezoneOffsetMinutes", 0)),
+                timezone_name=body.get("timezoneName"),
+                enabled=bool(body.get("enabled", True)),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        self._json(HTTPStatus.OK, {"ok": True, "item": item, "items": store.list_schedules()})
 
     def _history(self) -> None:
         params = parse_qs(urlparse(self.path).query)

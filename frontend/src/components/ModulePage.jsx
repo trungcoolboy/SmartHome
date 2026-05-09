@@ -2579,7 +2579,7 @@ function ModulePage({ page, alertFeed }) {
       ? [
           {
             id: "primary-remote-relay",
-            label: `${page.roomNode.title} ${page.roomNode.remoteRelayLabel}`,
+            label: page.roomNode.remoteRelayDisplayLabel ?? `${page.roomNode.title} ${page.roomNode.remoteRelayLabel}`,
             nodeKind: "primary",
             commandNodeKind: page.roomNode.remoteRelayCommandNodeKind ?? "secondary",
             relayKey: page.roomNode.remoteRelayLedKey ?? "touch3",
