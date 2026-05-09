@@ -143,8 +143,8 @@ export const pageContent = {
       title: "Living Room Node 02",
       apiPath: "/api/node/living-room-02",
       relays: [
-        { key: "relay1", label: "Relay 1" },
-        { key: "relay2", label: "Relay 2" },
+        { key: "relay1", label: "Relay 1", displayLabel: "Living Room Light 2" },
+        { key: "relay2", label: "Relay 2", displayLabel: "Living Room Light 3" },
       ],
       ledModes: [
         { key: "auto", label: "Auto" },
@@ -166,7 +166,7 @@ export const pageContent = {
     roomNodeSecondary: {
       title: "Living Room Node 01",
       apiPath: "/api/node/living-room-01",
-      relays: [{ key: "relay", label: "Relay" }],
+      relays: [{ key: "relay", label: "Relay", displayLabel: "Living Room Light 1" }],
       touches: [{ key: "touch", label: "Touch" }],
       ledModes: [
         { key: "auto", label: "Auto" },

@@ -2563,7 +2563,7 @@ function ModulePage({ page, alertFeed }) {
     ...(page.switchPanel && page.roomNode
       ? (page.roomNode.relays ?? []).map((relay) => ({
           id: `primary-${relay.key}`,
-          label: `${page.roomNode.title} ${relay.label}`,
+          label: relay.displayLabel ?? `${page.roomNode.title} ${relay.label}`,
           nodeKind: "primary",
           relayKey: relay.key,
           commandType: "relay",
@@ -2578,7 +2578,7 @@ function ModulePage({ page, alertFeed }) {
     ...(page.switchPanel && page.roomNodeSecondary
       ? (page.roomNodeSecondary.relays ?? []).map((relay) => ({
           id: `secondary-${relay.key}`,
-          label: `${page.roomNodeSecondary.title} ${relay.label}`,
+          label: relay.displayLabel ?? `${page.roomNodeSecondary.title} ${relay.label}`,
           nodeKind: "secondary",
           relayKey: relay.key,
           commandType: "relay",
