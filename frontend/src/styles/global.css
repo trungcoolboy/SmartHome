@@ -458,6 +458,50 @@ button {
   font: 0.86rem/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
+.livestream-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.livestream-form-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.livestream-form-grid-wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.livestream-form-grid label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.livestream-form-grid label span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.livestream-form-grid input,
+.livestream-form-grid select {
+  width: 100%;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(11, 18, 23, 0.72);
+  color: #ffffff;
+  font: inherit;
+}
+
 .temperature-chart-wrap {
   margin-top: 18px;
 }
@@ -4403,6 +4447,7 @@ button {
   .log-stat-strip,
   .statistics-grid,
   .backup-status-grid,
+  .livestream-form-grid-wide,
   .temperature-summary-grid {
     grid-template-columns: 1fr;
   }

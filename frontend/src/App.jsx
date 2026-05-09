@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getApiBaseUrl } from "./api";
 import BackupPage from "./components/BackupPage";
+import LivestreamPage from "./components/LivestreamPage";
 import MobileNav from "./components/MobileNav";
 import LogPage from "./components/LogPage";
 import ModulePage from "./components/ModulePage";
@@ -137,6 +138,8 @@ function App() {
           <StatisticsPage />
         ) : activePage === "backup" ? (
           <BackupPage />
+        ) : activePage === "livestream" ? (
+          <LivestreamPage />
         ) : (
           <ModulePage page={currentPage} alertFeed={alertFeed} />
         )}
