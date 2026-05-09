@@ -152,21 +152,25 @@ function BackupPage() {
 
       {error ? <p className="log-error">{error}</p> : null}
 
+      <section className="statistics-card statistics-card-wide backup-progress-card">
+        <div className="timeline-header">
+          <div>
+            <span className="eyebrow">Backup Progress</span>
+            <h3>{backupProgressStage}</h3>
+          </div>
+          <strong className="backup-progress-percent">{backupProgressPercent.toFixed(0)}%</strong>
+        </div>
+        <div className="backup-progress-meter backup-progress-meter-large" aria-label="Backup progress">
+          <span style={{ width: `${backupProgressPercent}%` }} />
+        </div>
+      </section>
+
       <section className="statistics-grid">
         <article className="statistics-card">
           <div className="timeline-header">
             <div>
               <span className="eyebrow">Status</span>
               <h3>{loading ? "Loading..." : lastStatusLabel}</h3>
-            </div>
-          </div>
-          <div className="backup-progress-block">
-            <div className="backup-progress-head">
-              <span>{backupProgressStage}</span>
-              <strong>{backupProgressPercent.toFixed(0)}%</strong>
-            </div>
-            <div className="backup-progress-meter" aria-label="Backup progress">
-              <span style={{ width: `${backupProgressPercent}%` }} />
             </div>
           </div>
           <div className="backup-status-grid">
