@@ -212,10 +212,16 @@ export const pageContent = {
     switchPanel: {
       title: "Relay Control",
     },
+    alarmPanel: {
+      title: "Alarm",
+      apiPath: "/api/alarms",
+      nodeApiPath: "/api/node/bedroom-2-01",
+      defaultDurationSeconds: 30,
+    },
     roomNode: {
       title: "Bedroom 2 Node 01",
       apiPath: "/api/node/bedroom-2-01",
-      relays: [{ key: "relay", label: "Relay", displayLabel: "Bedroom 2 Relay" }],
+      relays: [{ key: "relay", label: "Relay", displayLabel: "Bedroom 2 Light" }],
       touches: [{ key: "touch", label: "Touch" }],
       ledModes: [
         { key: "auto", label: "Auto" },
@@ -236,6 +242,7 @@ export const pageContent = {
       apiPath: "/api/node/bedroom-2-02",
       touches: [{ key: "touch", label: "Touch" }],
       remoteRelayLabel: "Remote Relay",
+      remoteRelayDisplayLabel: "Bedroom 2 Light (Remote)",
       remoteRelayToggleAction: { action: "toggle_remote" },
       remoteRelaySyncAction: { action: "sync_remote" },
       ledModeScopedByRelay: false,

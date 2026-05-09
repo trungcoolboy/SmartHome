@@ -314,6 +314,8 @@ class RelayScheduler:
         while not self.stop_event.is_set():
             for schedule in self.schedule_store.due_schedules():
                 self._execute_schedule(schedule)
+            for alarm in self.schedule_store.due_alarms():
+                self._execute_alarm(alarm)
             self.stop_event.wait(5)
 
     def _execute_schedule(self, schedule: dict[str, Any]) -> None:
@@ -365,6 +367,42 @@ class RelayScheduler:
                     event_type="scheduler_error",
                     direction="tx",
                     payload_json={"scheduleId": schedule_id, "error": str(exc)},
+                )
+
+    def _execute_alarm(self, alarm: dict[str, Any]) -> None:
+        run_key = str(alarm.get("runKey") or "")
+        alarm_id = int(alarm["id"])
+        try:
+            runtime = self.room_node_runtimes.get(str(alarm["routePrefix"]))
+            if runtime is None:
+                raise RuntimeError(f"node route not found: {alarm['routePrefix']}")
+
+            payload = {"action": "buzz", "durationMs": int(alarm["durationMs"])}
+            self.schedule_store.mark_alarm_run(alarm_id, run_key)
+            runtime.send_command(payload)
+            if self.event_store is not None:
+                self.event_store.record(
+                    source_type="alarm",
+                    source_id=str(alarm["nodeId"]),
+                    event_type="alarm_buzz",
+                    direction="tx",
+                    topic=runtime.command_topic,
+                    payload_json={
+                        "alarmId": alarm_id,
+                        "label": alarm.get("label"),
+                        "durationMs": alarm.get("durationMs"),
+                        "payload": payload,
+                    },
+                )
+        except Exception as exc:
+            self.schedule_store.mark_alarm_run(alarm_id, run_key, error=str(exc))
+            if self.event_store is not None:
+                self.event_store.record(
+                    source_type="alarm",
+                    source_id=str(alarm.get("nodeId") or "unknown"),
+                    event_type="alarm_error",
+                    direction="tx",
+                    payload_json={"alarmId": alarm_id, "error": str(exc)},
                 )
 
 
@@ -606,6 +644,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/schedules":
             self._schedules(parsed)
             return
+        if parsed.path == "/api/alarms":
+            self._alarms(parsed)
+            return
 
         if parsed.path.startswith(TV_ROUTE_PREFIX):
             self._handle_tv_request(parsed)
@@ -770,6 +811,86 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._json(HTTPStatus.OK, {"ok": True, "item": item, "items": store.list_schedules()})
+
+    def _alarms(self, parsed: Any) -> None:
+        store = self._require_schedule_store()
+        if self.command == "GET":
+            params = parse_qs(parsed.query)
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "items": store.list_alarms(route_prefix=params.get("route_prefix", [None])[0]),
+                    "serverTime": time.time(),
+                },
+            )
+            return
+
+        if self.command != "POST":
+            self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "expected JSON body"})
+            return
+
+        action = str(body.get("action") or "create")
+        try:
+            if action == "delete":
+                deleted = store.delete_alarm(int(body["id"]))
+                self._json(HTTPStatus.OK, {"ok": deleted, "items": store.list_alarms()})
+                return
+            if action == "set_enabled":
+                item = store.set_alarm_enabled(int(body["id"]), bool(body.get("enabled")))
+                if item is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "alarm not found"})
+                    return
+                self._json(HTTPStatus.OK, {"ok": True, "item": item, "items": store.list_alarms()})
+                return
+            if action in {"buzz", "stop_buzz"}:
+                route_prefix = str(body["routePrefix"])
+                runtime = self.room_node_runtimes.get(route_prefix)
+                if runtime is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": f"unknown node route: {route_prefix}"})
+                    return
+                payload: dict[str, Any]
+                if action == "stop_buzz":
+                    payload = {"action": "stop_buzz"}
+                else:
+                    duration_ms = max(1000, min(600000, int(body.get("durationMs", 30000))))
+                    payload = {"action": "buzz", "durationMs": duration_ms}
+                runtime.send_command(payload)
+                self._json(HTTPStatus.OK, {"ok": True, "sent": payload, "state": runtime.state.snapshot()})
+                return
+            if action != "create":
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown alarm action"})
+                return
+
+            route_prefix = str(body["routePrefix"])
+            runtime = self.room_node_runtimes.get(route_prefix)
+            if runtime is None:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": f"unknown node route: {route_prefix}"})
+                return
+            item = store.create_alarm(
+                label=str(body.get("label") or "Alarm"),
+                route_prefix=route_prefix,
+                node_id=runtime.state.node_id,
+                duration_ms=int(body.get("durationMs", 30000)),
+                time_of_day=str(body["timeOfDay"]),
+                days=[int(day) for day in body.get("days", [0, 1, 2, 3, 4, 5, 6])],
+                timezone_offset_minutes=int(body.get("timezoneOffsetMinutes", 0)),
+                timezone_name=body.get("timezoneName"),
+                enabled=bool(body.get("enabled", True)),
+            )
+        except (KeyError, TypeError, ValueError, subprocess.CalledProcessError) as exc:
+            detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+            self._json(HTTPStatus.BAD_REQUEST, {"error": detail})
+            return
+
+        self._json(HTTPStatus.OK, {"ok": True, "item": item, "items": store.list_alarms()})
 
     def _history(self) -> None:
         params = parse_qs(urlparse(self.path).query)

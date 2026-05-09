@@ -635,6 +635,89 @@ button {
   font-size: 0.9rem;
 }
 
+.alarm-panel-card {
+  align-content: start;
+}
+
+.alarm-panel-form {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) minmax(104px, 132px) max-content max-content;
+  align-items: end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.alarm-panel-form input {
+  min-height: 38px;
+  border: 1px solid rgba(160, 216, 238, 0.16);
+  border-radius: 12px;
+  background: rgba(7, 12, 20, 0.62);
+  color: var(--text);
+  padding: 0 12px;
+}
+
+.alarm-duration-field {
+  display: grid;
+  gap: 5px;
+}
+
+.alarm-duration-field span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.alarm-panel-form .ghost-pill {
+  justify-self: start;
+  min-height: 38px;
+  min-width: 64px;
+  padding: 0 16px;
+}
+
+.alarm-days,
+.alarm-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.alarm-days button {
+  min-width: 46px;
+  border: 1px solid rgba(160, 216, 238, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  padding: 7px 10px;
+}
+
+.alarm-days button.active {
+  border-color: rgba(255, 197, 79, 0.62);
+  background: rgba(255, 197, 79, 0.14);
+  color: #fff3ce;
+}
+
+.alarm-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  border: 1px solid rgba(160, 216, 238, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 5px 8px 5px 6px;
+}
+
+.alarm-item span {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.alarm-item small {
+  color: var(--text-muted);
+}
+
 .switch-led-indicator.switch-led-mode-off {
   background: rgba(255, 255, 255, 0.12);
 }
@@ -4408,6 +4491,10 @@ button {
     grid-template-columns: minmax(0, 1fr) minmax(82px, 0.65fr) max-content;
   }
 
+  .alarm-panel-form {
+    grid-template-columns: minmax(0, 1fr) minmax(96px, 0.65fr) max-content max-content;
+  }
+
   .ab-workspace-stats-panel,
   .ab-workspace-controls-panel {
     position: static !important;
@@ -4572,6 +4659,10 @@ button {
 
   .switch-scheduler-form .ghost-pill {
     width: auto;
+  }
+
+  .alarm-panel-form {
+    grid-template-columns: 1fr 1fr;
   }
 
   .tv-app-grid,

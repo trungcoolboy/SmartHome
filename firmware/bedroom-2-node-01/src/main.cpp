@@ -30,7 +30,9 @@ bool touch_active = false;
 bool last_touch_raw = false;
 LedMode led_mode = LedMode::Auto;
 bool buzzer_active = false;
+bool buzzer_output_on = false;
 unsigned long buzzer_until_ms = 0;
+unsigned long buzzer_next_toggle_ms = 0;
 unsigned long last_telemetry_ms = 0;
 unsigned long last_status_log_ms = 0;
 unsigned long last_wifi_begin_ms = 0;
@@ -43,6 +45,9 @@ unsigned long touch_release_stable_since_ms = 0;
 unsigned long last_local_action_ms = 0;
 unsigned long mqtt_retry_backoff_ms = 2000;
 bool wifi_begin_called = false;
+
+constexpr unsigned long kBuzzerBeepOnMs = 180;
+constexpr unsigned long kBuzzerBeepOffMs = 220;
 bool telemetry_dirty = false;
 bool state_dirty = false;
 const char* pending_event = "state_sync";
@@ -233,18 +238,35 @@ void write_buzzer(bool active) {
 }
 
 void pulse_buzzer(unsigned long duration_ms) {
+  const unsigned long now = millis();
   buzzer_active = true;
-  buzzer_until_ms = millis() + duration_ms;
+  buzzer_output_on = true;
+  buzzer_until_ms = now + duration_ms;
+  buzzer_next_toggle_ms = now + kBuzzerBeepOnMs;
   write_buzzer(true);
+}
+
+void stop_buzzer() {
+  buzzer_active = false;
+  buzzer_output_on = false;
+  buzzer_until_ms = 0;
+  buzzer_next_toggle_ms = 0;
+  write_buzzer(false);
 }
 
 void update_buzzer() {
   if (!buzzer_active) {
     return;
   }
-  if (static_cast<long>(millis() - buzzer_until_ms) >= 0) {
-    buzzer_active = false;
-    write_buzzer(false);
+  const unsigned long now = millis();
+  if (static_cast<long>(now - buzzer_until_ms) >= 0) {
+    stop_buzzer();
+    return;
+  }
+  if (static_cast<long>(now - buzzer_next_toggle_ms) >= 0) {
+    buzzer_output_on = !buzzer_output_on;
+    buzzer_next_toggle_ms = now + (buzzer_output_on ? kBuzzerBeepOnMs : kBuzzerBeepOffMs);
+    write_buzzer(buzzer_output_on);
   }
 }
 
@@ -420,6 +442,13 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  if (strcmp(action, "stop_buzz") == 0) {
+    stop_buzzer();
+    telemetry_dirty = true;
+    queue_state("buzz_stopped", nullptr);
+    return;
+  }
+
   queue_state("unknown_action", action);
 }
 
@@ -514,7 +543,7 @@ void init_gpio() {
   pinMode(NodeConfig::kLedPin, OUTPUT);
   pinMode(NodeConfig::kBuzzerPin, OUTPUT);
   pinMode(NodeConfig::kTouchPin, NodeConfig::kTouchActiveHigh ? INPUT : INPUT_PULLUP);
-  write_buzzer(false);
+  stop_buzzer();
   apply_output();
   last_touch_raw = read_touch_active();
   touch_active = false;

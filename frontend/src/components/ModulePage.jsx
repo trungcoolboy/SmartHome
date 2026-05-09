@@ -793,6 +793,13 @@ function ModulePage({ page, alertFeed }) {
   const [switchSchedules, setSwitchSchedules] = useState([]);
   const [switchScheduleDrafts, setSwitchScheduleDrafts] = useState({});
   const [switchScheduleError, setSwitchScheduleError] = useState("");
+  const [alarmSchedules, setAlarmSchedules] = useState([]);
+  const [alarmDraft, setAlarmDraft] = useState({
+    timeOfDay: "",
+    durationSeconds: 30,
+    days: DEFAULT_SCHEDULE_DAYS,
+  });
+  const [alarmError, setAlarmError] = useState("");
   const [pumpStates, setPumpStates] = useState({});
   const [miscStates, setMiscStates] = useState({});
   const [sensorStates, setSensorStates] = useState({});
@@ -2369,6 +2376,48 @@ function ModulePage({ page, alertFeed }) {
   }, [page.switchPanel, page.roomNode?.apiPath, page.roomNodeSecondary?.apiPath]);
 
   useEffect(() => {
+    if (!page.alarmPanel?.apiPath) {
+      setAlarmSchedules([]);
+      setAlarmError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadAlarms() {
+      try {
+        const params = page.alarmPanel.nodeApiPath
+          ? `?route_prefix=${encodeURIComponent(page.alarmPanel.nodeApiPath)}`
+          : "";
+        const response = await fetch(`${getApiBaseUrl(page.alarmPanel.apiPath)}${params}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `alarms ${response.status}`);
+        }
+        if (!cancelled) {
+          setAlarmSchedules(payload.items ?? []);
+          setAlarmError("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAlarmError(error.message);
+        }
+      }
+    }
+
+    setAlarmDraft((current) => ({
+      ...current,
+      durationSeconds: page.alarmPanel.defaultDurationSeconds ?? current.durationSeconds ?? 30,
+    }));
+    loadAlarms();
+    const timer = window.setInterval(loadAlarms, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [page.alarmPanel?.apiPath, page.alarmPanel?.nodeApiPath, page.alarmPanel?.defaultDurationSeconds]);
+
+  useEffect(() => {
     const baseUrl = getUploadBaseUrl();
     if (!baseUrl) {
       setUploadItems([]);
@@ -2660,7 +2709,7 @@ function ModulePage({ page, alertFeed }) {
       ? [
           {
             id: "secondary-remote-relay",
-            label: `${page.roomNodeSecondary.title} ${page.roomNodeSecondary.remoteRelayLabel}`,
+            label: page.roomNodeSecondary.remoteRelayDisplayLabel ?? `${page.roomNodeSecondary.title} ${page.roomNodeSecondary.remoteRelayLabel}`,
             nodeKind: "secondary",
             relayKey: "remoteRelay",
             commandType: "remote",
@@ -3693,6 +3742,151 @@ function ModulePage({ page, alertFeed }) {
     }
   }
 
+  function toggleAlarmDraftDay(dayKey) {
+    const daySet = new Set(alarmDraft.days ?? DEFAULT_SCHEDULE_DAYS);
+    if (daySet.has(dayKey)) {
+      daySet.delete(dayKey);
+    } else {
+      daySet.add(dayKey);
+    }
+    setAlarmDraft((current) => ({
+      ...current,
+      days: daySet.size ? Array.from(daySet).sort((a, b) => a - b) : [dayKey],
+    }));
+  }
+
+  async function createAlarm() {
+    if (!page.alarmPanel?.apiPath || !page.alarmPanel?.nodeApiPath) {
+      setAlarmError("missing alarm node");
+      return;
+    }
+    if (!alarmDraft.timeOfDay) {
+      setAlarmError("choose a time first");
+      return;
+    }
+    const durationSeconds = Number.parseInt(String(alarmDraft.durationSeconds), 10);
+    if (!Number.isFinite(durationSeconds) || durationSeconds < 1) {
+      setAlarmError("duration must be at least 1 second");
+      return;
+    }
+
+    try {
+      const response = await fetch(getApiBaseUrl(page.alarmPanel.apiPath), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          label: "Bedroom 2 Alarm",
+          routePrefix: page.alarmPanel.nodeApiPath,
+          durationMs: Math.min(durationSeconds, 600) * 1000,
+          timeOfDay: alarmDraft.timeOfDay,
+          days: alarmDraft.days ?? DEFAULT_SCHEDULE_DAYS,
+          timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+          timezoneName: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `alarm ${response.status}`);
+      }
+      setAlarmSchedules(payload.items ?? []);
+      setAlarmDraft((current) => ({ ...current, timeOfDay: "" }));
+      setAlarmError("");
+    } catch (error) {
+      setAlarmError(error.message);
+    }
+  }
+
+  async function setAlarmEnabled(alarmId, enabled) {
+    if (!page.alarmPanel?.apiPath) {
+      return;
+    }
+    try {
+      const response = await fetch(getApiBaseUrl(page.alarmPanel.apiPath), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set_enabled", id: alarmId, enabled }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `alarm ${response.status}`);
+      }
+      setAlarmSchedules(payload.items ?? []);
+      setAlarmError("");
+    } catch (error) {
+      setAlarmError(error.message);
+    }
+  }
+
+  async function deleteAlarm(alarmId) {
+    if (!page.alarmPanel?.apiPath) {
+      return;
+    }
+    try {
+      const response = await fetch(getApiBaseUrl(page.alarmPanel.apiPath), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", id: alarmId }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `alarm ${response.status}`);
+      }
+      setAlarmSchedules(payload.items ?? []);
+      setAlarmError("");
+    } catch (error) {
+      setAlarmError(error.message);
+    }
+  }
+
+  async function testAlarm() {
+    if (!page.alarmPanel?.apiPath || !page.alarmPanel?.nodeApiPath) {
+      return;
+    }
+    const durationSeconds = Number.parseInt(String(alarmDraft.durationSeconds), 10);
+    try {
+      const response = await fetch(getApiBaseUrl(page.alarmPanel.apiPath), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "buzz",
+          routePrefix: page.alarmPanel.nodeApiPath,
+          durationMs: Math.min(Math.max(durationSeconds || 1, 1), 600) * 1000,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `alarm ${response.status}`);
+      }
+      setAlarmError("");
+    } catch (error) {
+      setAlarmError(error.message);
+    }
+  }
+
+  async function stopAlarm() {
+    if (!page.alarmPanel?.apiPath || !page.alarmPanel?.nodeApiPath) {
+      return;
+    }
+    try {
+      const response = await fetch(getApiBaseUrl(page.alarmPanel.apiPath), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "stop_buzz",
+          routePrefix: page.alarmPanel.nodeApiPath,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `alarm ${response.status}`);
+      }
+      setAlarmError("");
+    } catch (error) {
+      setAlarmError(error.message);
+    }
+  }
+
   async function setSwitchRelay(nodeKind, relayKey, nextValue, commandType = "relay") {
     if (commandType === "remote") {
       await sendRoomNodeSecondaryCommand({
@@ -3998,6 +4192,86 @@ function ModulePage({ page, alertFeed }) {
           })}
         </div>
         {switchScheduleError ? <p className="switch-scheduler-error">{switchScheduleError}</p> : null}
+      </article>
+    );
+  }
+
+  function renderAlarmPanelCard() {
+    if (!page.alarmPanel) {
+      return null;
+    }
+
+    return (
+      <article className="tv-control-card alarm-panel-card">
+        <span className="eyebrow">{page.alarmPanel.title}</span>
+        <div className="alarm-panel-form">
+          <input
+            type="time"
+            value={alarmDraft.timeOfDay}
+            onChange={(event) => setAlarmDraft((current) => ({ ...current, timeOfDay: event.target.value }))}
+            aria-label="Alarm time"
+          />
+          <label className="alarm-duration-field">
+            <span>Seconds</span>
+            <input
+              type="number"
+              min="1"
+              max="600"
+              value={alarmDraft.durationSeconds}
+              onChange={(event) => setAlarmDraft((current) => ({ ...current, durationSeconds: event.target.value }))}
+            />
+          </label>
+          <button className="ghost-pill" type="button" onClick={createAlarm}>
+            Add
+          </button>
+          <button className="ghost-pill" type="button" onClick={testAlarm}>
+            Test
+          </button>
+        </div>
+        <div className="alarm-days">
+          {SCHEDULE_WEEKDAYS.map((day) => (
+            <button
+              key={`alarm-day-${day.key}`}
+              className={(alarmDraft.days ?? DEFAULT_SCHEDULE_DAYS).includes(day.key) ? "active" : ""}
+              type="button"
+              onClick={() => toggleAlarmDraftDay(day.key)}
+            >
+              {day.label}
+            </button>
+          ))}
+        </div>
+        {alarmSchedules.length ? (
+          <div className="alarm-list">
+            {alarmSchedules.map((alarm) => (
+              <div key={alarm.id} className="alarm-item">
+                <label className={`ios-toggle ios-toggle-small ${alarm.enabled ? "is-on" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={alarm.enabled}
+                    onChange={(event) => setAlarmEnabled(alarm.id, event.target.checked)}
+                  />
+                  <span className="ios-toggle-track" />
+                </label>
+                <span>
+                  <strong>{alarm.timeOfDay}</strong>
+                  {" "}
+                  {Math.round((alarm.durationMs ?? 0) / 1000)}s
+                  {" "}
+                  <small>{formatScheduleDays(alarm.days)}</small>
+                </span>
+                <button
+                  className="switch-scheduler-delete"
+                  type="button"
+                  onClick={() => deleteAlarm(alarm.id)}
+                  aria-label="Delete alarm"
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {alarmError ? <p className="switch-scheduler-error">{alarmError}</p> : null}
       </article>
     );
   }
@@ -4689,6 +4963,7 @@ function ModulePage({ page, alertFeed }) {
           {page.switchPanel && showSwitchPanelTab ? (
             <section className="tv-control-grid">
               {renderSwitchPanelCard()}
+              {renderAlarmPanelCard()}
             </section>
           ) : null}
 
@@ -4698,6 +4973,7 @@ function ModulePage({ page, alertFeed }) {
       {!page.featuredDevice && page.switchPanel ? (
         <section className="tv-control-grid">
           {renderSwitchPanelCard()}
+          {renderAlarmPanelCard()}
         </section>
       ) : null}
 
