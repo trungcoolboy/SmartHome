@@ -400,6 +400,39 @@ class LivestreamManager:
                     process.wait(timeout=5)
         return self.status()
 
+    def preview_jpeg(self) -> bytes:
+        with self.lock:
+            config = self._load_config_unlocked()
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "v4l2",
+            "-input_format",
+            "mjpeg",
+            "-video_size",
+            str(config.get("resolution") or self.DEFAULT_CONFIG["resolution"]),
+            "-i",
+            str(config.get("videoDevice") or self.DEFAULT_CONFIG["videoDevice"]),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ]
+        result = subprocess.run(command, capture_output=True, timeout=8, check=False)
+        if result.returncode != 0 or not result.stdout:
+            detail = result.stderr.decode("utf-8", errors="replace").strip() or "cannot capture preview"
+            raise RuntimeError(detail)
+        return result.stdout
+
 
 @dataclass
 class Stm32Runtime:
@@ -1080,6 +1113,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/livestream":
             self._livestream()
             return
+        if parsed.path == "/api/livestream/preview.jpg":
+            self._livestream_preview()
+            return
         if parsed.path == "/api/uploads":
             self._uploads()
             return
@@ -1222,6 +1258,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), **manager.status()})
         except Exception as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), **manager.status()})
+
+    def _livestream_preview(self) -> None:
+        manager = self._require_livestream_manager()
+        try:
+            body = manager.preview_jpeg()
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), **manager.status()})
+            return
+        self.send_response(HTTPStatus.OK)
+        self._write_common_headers(content_type="image/jpeg", content_length=len(body))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _backups(self) -> None:
         if self.command == "GET":

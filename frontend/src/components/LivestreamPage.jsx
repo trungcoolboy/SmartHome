@@ -26,6 +26,7 @@ function LivestreamPage() {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [previewVersion, setPreviewVersion] = useState(Date.now());
 
   function applyConfig(config) {
     if (!config) {
@@ -89,6 +90,7 @@ function LivestreamPage() {
     const timerId = window.setInterval(() => {
       if (!cancelled) {
         loadLivestream({ quiet: true });
+        setPreviewVersion(Date.now());
       }
     }, 3000);
     return () => {
@@ -165,6 +167,20 @@ function LivestreamPage() {
       {error ? <p className="log-error">{error}</p> : null}
 
       <section className="statistics-grid">
+        <article className="statistics-card livestream-preview-card">
+          <div className="timeline-header">
+            <div>
+              <span className="eyebrow">Preview</span>
+              <h3>Webcam</h3>
+            </div>
+          </div>
+          <img
+            className="livestream-preview-image"
+            src={getApiBaseUrl(`/api/livestream/preview.jpg?t=${previewVersion}`)}
+            alt="Webcam preview"
+          />
+        </article>
+
         <article className="statistics-card">
           <div className="timeline-header">
             <div>
