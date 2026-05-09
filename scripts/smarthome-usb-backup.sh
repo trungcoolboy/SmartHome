@@ -10,9 +10,34 @@ KEEP_BACKUPS=14
 REPO_DIR="/home/trungcoolboy/SmartHome"
 STATE_DIR="${REPO_DIR}/backend/state"
 UPLOAD_DIR="/home/trungcoolboy/smart-home/uploads/dashboard"
+PROGRESS_FILE="/run/smarthome-usb-backup-progress.json"
+backup_success=0
 
 log() {
   printf '%s %s\n' "$(date -Is)" "$*"
+}
+
+write_progress() {
+  local percent="$1"
+  local stage="$2"
+  local status="${3:-running}"
+  local archive="${4:-}"
+  python3 - "$PROGRESS_FILE" "$percent" "$stage" "$status" "$archive" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = {
+    "percent": max(0.0, min(100.0, float(sys.argv[2]))),
+    "stage": sys.argv[3],
+    "status": sys.argv[4],
+    "archive": sys.argv[5] or None,
+    "updatedAt": time.time(),
+}
+path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+PY
 }
 
 copy_path_if_exists() {
@@ -35,12 +60,15 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+write_progress 1 "Starting backup" "running"
+
 exec 9>/run/smarthome-usb-backup.lock
 if ! flock -n 9; then
   log "backup already running"
   exit 0
 fi
 
+write_progress 3 "Mounting USB" "running"
 mkdir -p "$MOUNT_POINT"
 if ! findmnt -rn "$MOUNT_POINT" >/dev/null; then
   mount "UUID=${USB_UUID}" "$MOUNT_POINT"
@@ -63,7 +91,11 @@ DEST_DIR="${BACKUP_ROOT}/${HOST_NAME}"
 ARCHIVE="${DEST_DIR}/smarthome-config-${STAMP}.tar.gz"
 
 cleanup() {
+  local code="$?"
   rm -rf "$WORK_DIR"
+  if [[ "$backup_success" -ne 1 && "$code" -ne 0 ]]; then
+    write_progress 100 "Backup failed" "failed" "${ARCHIVE:-}"
+  fi
 }
 trap cleanup EXIT
 
@@ -71,6 +103,7 @@ mkdir -p "$STAGING" "$DEST_DIR"
 
 log "backup staging started: ${STAGING}"
 
+write_progress 12 "Backing up state database" "running" "$ARCHIVE"
 mkdir -p "${STAGING}${STATE_DIR}"
 if [[ -d "$STATE_DIR" ]]; then
   rsync -a --numeric-ids \
@@ -102,6 +135,7 @@ for src in src_dir.glob("*.sqlite3"):
 PY
 fi
 
+write_progress 35 "Copying local config" "running" "$ARCHIVE"
 copy_path_if_exists "$UPLOAD_DIR" "$STAGING"
 copy_path_if_exists "/home/trungcoolboy/.ssh" "$STAGING"
 copy_path_if_exists "/home/trungcoolboy/.gitconfig" "$STAGING"
@@ -112,10 +146,12 @@ copy_path_if_exists "/etc/mosquitto/conf.d" "$STAGING"
 copy_path_if_exists "/etc/netplan" "$STAGING"
 copy_path_if_exists "/etc/NetworkManager/system-connections" "$STAGING"
 
+write_progress 52 "Copying systemd units" "running" "$ARCHIVE"
 mkdir -p "${STAGING}/etc/systemd/system"
 find /etc/systemd/system -maxdepth 1 -type f \( -name 'smart-home*.service' -o -name 'smart-home*.timer' -o -name 'smarthome*.service' -o -name 'smarthome*.timer' \) \
   -exec rsync -a --numeric-ids {} "${STAGING}/etc/systemd/system/" \;
 
+write_progress 62 "Collecting system info" "running" "$ARCHIVE"
 mkdir -p "${STAGING}/system-info"
 {
   echo "timestamp_utc=${STAMP}"
@@ -149,14 +185,19 @@ cat >"${STAGING}/RESTORE.md" <<'EOF'
 Repo khong duoc backup trong archive nay. Archive chi giu state DB, key local, service va cau hinh may.
 EOF
 
+write_progress 78 "Compressing archive" "running" "$ARCHIVE"
 tar -C "$WORK_DIR" -czf "$ARCHIVE" smarthome-restore
 chmod 600 "$ARCHIVE"
 ln -sfn "$(basename "$ARCHIVE")" "${DEST_DIR}/latest.tar.gz"
 
+write_progress 90 "Cleaning old backups" "running" "$ARCHIVE"
 find "$DEST_DIR" -maxdepth 1 -type f -name 'smarthome-config-*.tar.gz' -printf '%T@ %p\n' \
   | sort -rn \
   | awk "NR>${KEEP_BACKUPS} {print substr(\$0, index(\$0,\$2))}" \
   | xargs -r rm -f
 
+write_progress 96 "Syncing USB" "running" "$ARCHIVE"
 sync "$MOUNT_POINT" || sync
 log "backup completed: ${ARCHIVE}"
+backup_success=1
+write_progress 100 "Backup completed" "success" "$ARCHIVE"

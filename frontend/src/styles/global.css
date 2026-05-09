@@ -328,6 +328,65 @@ button {
   border-radius: 14px;
 }
 
+.backup-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.backup-status-grid div,
+.backup-latest {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.backup-status-grid span,
+.backup-latest span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.backup-status-grid strong,
+.backup-latest strong {
+  display: block;
+  margin-top: 8px;
+  color: #eef8ff;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.backup-latest {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.backup-ok {
+  color: #75e39a;
+}
+
+.backup-fail {
+  color: var(--danger);
+}
+
+.backup-log {
+  max-height: 260px;
+  margin: 14px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #d8eef8;
+  font: 0.86rem/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
 .temperature-chart-wrap {
   margin-top: 18px;
 }
@@ -4272,6 +4331,7 @@ button {
   .log-filter-grid,
   .log-stat-strip,
   .statistics-grid,
+  .backup-status-grid,
   .temperature-summary-grid {
     grid-template-columns: 1fr;
   }

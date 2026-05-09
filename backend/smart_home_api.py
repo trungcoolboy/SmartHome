@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,6 +29,11 @@ from webos_tv_bridge import TvState, WebOsTvBridge, start_command_worker
 
 
 TV_ROUTE_PREFIX = "/api/tv/living-room"
+BACKUP_SERVICE_NAME = "smarthome-usb-backup.service"
+BACKUP_TIMER_NAME = "smarthome-usb-backup.timer"
+BACKUP_ARCHIVE_DIR = Path("/mnt/smarthome-backup/smarthome-backups/ubuntu")
+BACKUP_LOG_PATH = Path("/var/log/smarthome-usb-backup.log")
+BACKUP_PROGRESS_PATH = Path("/run/smarthome-usb-backup-progress.json")
 ROOM_NODE_CONFIGS = [
     ("/api/node/living-room-01", "living-room-node-01"),
     ("/api/node/living-room-02", "living-room-node-02"),
@@ -48,6 +54,144 @@ def read_system_uptime_seconds() -> float | None:
         return float(raw[0])
     except (OSError, ValueError, IndexError):
         return None
+
+
+def systemctl_show(unit: str, properties: list[str]) -> dict[str, str]:
+    command = ["systemctl", "show", unit, "--no-pager"]
+    for prop in properties:
+        command.append(f"--property={prop}")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
+    values: dict[str, str] = {"ok": "true" if result.returncode == 0 else "false"}
+    if result.stderr.strip():
+        values["error"] = result.stderr.strip()
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
+
+
+def tail_text_file(path: Path, limit: int = 20) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return lines[-limit:]
+    except OSError:
+        return []
+
+
+def read_backup_progress() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(BACKUP_PROGRESS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        updated_at = float(payload.get("updatedAt") or 0.0)
+        payload["updatedAgeSeconds"] = max(0.0, time.time() - updated_at) if updated_at else None
+        return payload
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def build_backup_status() -> dict[str, Any]:
+    service = systemctl_show(
+        BACKUP_SERVICE_NAME,
+        [
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "Result",
+            "ExecMainCode",
+            "ExecMainStatus",
+            "ExecMainStartTimestamp",
+            "ExecMainExitTimestamp",
+            "StateChangeTimestamp",
+        ],
+    )
+    timer = systemctl_show(
+        BACKUP_TIMER_NAME,
+        [
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "NextElapseUSecRealtime",
+            "LastTriggerUSec",
+            "Result",
+        ],
+    )
+    log_lines = tail_text_file(BACKUP_LOG_PATH, 30)
+    progress = read_backup_progress()
+    completed_archives = {
+        line.rsplit("backup completed:", 1)[1].strip()
+        for line in log_lines
+        if "backup completed:" in line
+    }
+
+    backups: list[dict[str, Any]] = []
+    if BACKUP_ARCHIVE_DIR.exists():
+        for archive in sorted(
+            BACKUP_ARCHIVE_DIR.glob("smarthome-config-*.tar.gz"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                stat = archive.stat()
+            except OSError:
+                continue
+            archive_path = str(archive)
+            backups.append(
+                {
+                    "fileName": archive.name,
+                    "path": archive_path,
+                    "sizeBytes": stat.st_size,
+                    "createdAt": stat.st_mtime,
+                    "successful": stat.st_size > 0,
+                    "completedInLog": archive_path in completed_archives,
+                }
+            )
+
+    latest_target: str | None = None
+    latest_link = BACKUP_ARCHIVE_DIR / "latest.tar.gz"
+    try:
+        if latest_link.is_symlink():
+            latest_target = os.readlink(latest_link)
+    except OSError:
+        latest_target = None
+
+    disk_usage = None
+    if BACKUP_ARCHIVE_DIR.exists():
+        try:
+            usage = shutil.disk_usage(BACKUP_ARCHIVE_DIR)
+            used = usage.total - usage.free
+            disk_usage = {
+                "totalBytes": usage.total,
+                "usedBytes": used,
+                "freeBytes": usage.free,
+                "usedPercent": round((used / usage.total) * 100.0, 1) if usage.total else 0.0,
+            }
+        except OSError:
+            disk_usage = None
+
+    backup_running = service.get("ActiveState") in {"active", "activating"} or (
+        isinstance(progress, dict) and progress.get("status") == "running"
+    )
+
+    return {
+        "serverTime": time.time(),
+        "serviceName": BACKUP_SERVICE_NAME,
+        "timerName": BACKUP_TIMER_NAME,
+        "archiveDir": str(BACKUP_ARCHIVE_DIR),
+        "logPath": str(BACKUP_LOG_PATH),
+        "mounted": BACKUP_ARCHIVE_DIR.exists(),
+        "running": backup_running,
+        "lastSuccessful": service.get("Result") == "success" and service.get("ExecMainStatus") in {"0", ""},
+        "service": service,
+        "timer": timer,
+        "latest": latest_target,
+        "diskUsage": disk_usage,
+        "progress": progress,
+        "items": backups,
+        "logs": log_lines,
+    }
 
 
 @dataclass
@@ -722,6 +866,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/statistics":
             self._statistics()
             return
+        if parsed.path == "/api/backups":
+            self._backups()
+            return
         if parsed.path == "/api/uploads":
             self._uploads()
             return
@@ -821,6 +968,37 @@ class Handler(BaseHTTPRequestHandler):
         if self.schedule_store is None:
             raise RuntimeError("Schedule store is not configured")
         return self.schedule_store
+
+    def _backups(self) -> None:
+        if self.command == "GET":
+            self._json(HTTPStatus.OK, build_backup_status())
+            return
+
+        if self.command == "POST":
+            status = build_backup_status()
+            if status.get("running"):
+                self._json(HTTPStatus.CONFLICT, {**status, "error": "backup is already running"})
+                return
+            result = subprocess.run(
+                ["systemctl", "start", "--no-block", BACKUP_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            next_status = build_backup_status()
+            next_status["startCommand"] = {
+                "returnCode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            }
+            if result.returncode != 0:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {**next_status, "error": "backup start failed"})
+                return
+            self._json(HTTPStatus.OK, next_status)
+            return
+
+        self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
 
     def _schedules(self, parsed: Any) -> None:
         store = self._require_schedule_store()

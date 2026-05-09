@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { getApiBaseUrl } from "./api";
+import BackupPage from "./components/BackupPage";
 import MobileNav from "./components/MobileNav";
 import LogPage from "./components/LogPage";
 import ModulePage from "./components/ModulePage";
@@ -134,6 +135,8 @@ function App() {
           <LogPage />
         ) : activePage === "statistics" ? (
           <StatisticsPage />
+        ) : activePage === "backup" ? (
+          <BackupPage />
         ) : (
           <ModulePage page={currentPage} alertFeed={alertFeed} />
         )}
