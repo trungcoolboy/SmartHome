@@ -797,6 +797,7 @@ function ModulePage({ page, alertFeed }) {
   const [alarmDraft, setAlarmDraft] = useState({
     timeOfDay: "",
     durationSeconds: 30,
+    lightOn: false,
     days: DEFAULT_SCHEDULE_DAYS,
   });
   const [alarmError, setAlarmError] = useState("");
@@ -3779,6 +3780,7 @@ function ModulePage({ page, alertFeed }) {
           label: "Bedroom 2 Alarm",
           routePrefix: page.alarmPanel.nodeApiPath,
           durationMs: Math.min(durationSeconds, 600) * 1000,
+          lightOn: Boolean(alarmDraft.lightOn),
           timeOfDay: alarmDraft.timeOfDay,
           days: alarmDraft.days ?? DEFAULT_SCHEDULE_DAYS,
           timezoneOffsetMinutes: new Date().getTimezoneOffset(),
@@ -3852,6 +3854,7 @@ function ModulePage({ page, alertFeed }) {
           action: "buzz",
           routePrefix: page.alarmPanel.nodeApiPath,
           durationMs: Math.min(Math.max(durationSeconds || 1, 1), 600) * 1000,
+          lightOn: Boolean(alarmDraft.lightOn),
         }),
       });
       const payload = await response.json();
@@ -4221,11 +4224,22 @@ function ModulePage({ page, alertFeed }) {
               onChange={(event) => setAlarmDraft((current) => ({ ...current, durationSeconds: event.target.value }))}
             />
           </label>
+          <label className="alarm-light-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(alarmDraft.lightOn)}
+              onChange={(event) => setAlarmDraft((current) => ({ ...current, lightOn: event.target.checked }))}
+            />
+            <span>Light</span>
+          </label>
           <button className="ghost-pill" type="button" onClick={createAlarm}>
             Add
           </button>
           <button className="ghost-pill" type="button" onClick={testAlarm}>
             Test
+          </button>
+          <button className="ghost-pill alarm-stop-button" type="button" onClick={stopAlarm}>
+            Stop
           </button>
         </div>
         <div className="alarm-days">
@@ -4256,6 +4270,7 @@ function ModulePage({ page, alertFeed }) {
                   <strong>{alarm.timeOfDay}</strong>
                   {" "}
                   {Math.round((alarm.durationMs ?? 0) / 1000)}s
+                  {alarm.lightOn ? " Light" : ""}
                   {" "}
                   <small>{formatScheduleDays(alarm.days)}</small>
                 </span>

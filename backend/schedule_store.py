@@ -55,6 +55,7 @@ class ScheduleStore:
                     route_prefix TEXT NOT NULL,
                     node_id TEXT NOT NULL,
                     duration_ms INTEGER NOT NULL DEFAULT 30000,
+                    light_on INTEGER NOT NULL DEFAULT 0,
                     time_of_day TEXT NOT NULL,
                     days_json TEXT NOT NULL,
                     timezone_offset_minutes INTEGER NOT NULL DEFAULT 0,
@@ -71,7 +72,14 @@ class ScheduleStore:
                     ON alarm_schedules(route_prefix);
                 """
             )
+            self._ensure_column_locked("alarm_schedules", "light_on", "INTEGER NOT NULL DEFAULT 0")
             self.conn.commit()
+
+    def _ensure_column_locked(self, table: str, column: str, definition: str) -> None:
+        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if any(row["name"] == column for row in rows):
+            return
+        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         with self.lock:
@@ -220,6 +228,7 @@ class ScheduleStore:
         route_prefix: str,
         node_id: str,
         duration_ms: int,
+        light_on: bool,
         time_of_day: str,
         days: list[int],
         timezone_offset_minutes: int,
@@ -234,9 +243,9 @@ class ScheduleStore:
             cursor = self.conn.execute(
                 """
                 INSERT INTO alarm_schedules (
-                    enabled, label, route_prefix, node_id, duration_ms, time_of_day,
+                    enabled, label, route_prefix, node_id, duration_ms, light_on, time_of_day,
                     days_json, timezone_offset_minutes, timezone_name, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     1 if enabled else 0,
@@ -244,6 +253,7 @@ class ScheduleStore:
                     route_prefix,
                     node_id,
                     normalized_duration_ms,
+                    1 if light_on else 0,
                     normalized_time,
                     json.dumps(normalized_days, ensure_ascii=True),
                     int(timezone_offset_minutes),
@@ -367,6 +377,7 @@ class ScheduleStore:
             "routePrefix": row["route_prefix"],
             "nodeId": row["node_id"],
             "durationMs": row["duration_ms"],
+            "lightOn": bool(row["light_on"]),
             "timeOfDay": row["time_of_day"],
             "days": json.loads(row["days_json"]),
             "timezoneOffsetMinutes": row["timezone_offset_minutes"],

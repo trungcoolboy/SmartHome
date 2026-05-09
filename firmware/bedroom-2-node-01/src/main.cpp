@@ -25,12 +25,21 @@ enum class LedMode : uint8_t {
   Candle,
 };
 
+enum class BuzzerPattern : uint8_t {
+  Soft,
+  Normal,
+  Strong,
+};
+
 bool relay_on = false;
 bool touch_active = false;
 bool last_touch_raw = false;
 LedMode led_mode = LedMode::Auto;
+BuzzerPattern buzzer_pattern = BuzzerPattern::Normal;
 bool buzzer_active = false;
 bool buzzer_output_on = false;
+BuzzerPattern buzzer_active_pattern = BuzzerPattern::Normal;
+uint8_t buzzer_phase = 0;
 unsigned long buzzer_until_ms = 0;
 unsigned long buzzer_next_toggle_ms = 0;
 unsigned long last_telemetry_ms = 0;
@@ -46,8 +55,11 @@ unsigned long last_local_action_ms = 0;
 unsigned long mqtt_retry_backoff_ms = 2000;
 bool wifi_begin_called = false;
 
-constexpr unsigned long kBuzzerBeepOnMs = 180;
-constexpr unsigned long kBuzzerBeepOffMs = 220;
+constexpr unsigned long kBuzzerSoftOnMs = 180;
+constexpr unsigned long kBuzzerSoftOffMs = 1820;
+constexpr unsigned long kBuzzerNormalOnMs = 180;
+constexpr unsigned long kBuzzerNormalOffMs = 820;
+constexpr unsigned long kBuzzerStrongPhaseMs[] = {150, 150, 150, 1550};
 bool telemetry_dirty = false;
 bool state_dirty = false;
 const char* pending_event = "state_sync";
@@ -63,6 +75,7 @@ constexpr unsigned long kTouchReleaseDebounceMs = 250;
 constexpr unsigned long kTouchRetriggerGuardMs = 2000;
 constexpr unsigned long kTouchIgnoreAfterRelayMs = 1200;
 constexpr unsigned long kTouchRearmReleaseStableMs = 500;
+constexpr unsigned long kAlarmTouchStopMs = 2000;
 constexpr unsigned long kLedConfirmOffMs = 80;
 constexpr unsigned long kLedConfirmFullMs = 260;
 constexpr bool kTouchControlEnabled = true;
@@ -277,6 +290,11 @@ void write_led() {
   };
 
   const unsigned long now_ms = millis();
+  if (buzzer_active) {
+    write_led_level(buzzer_output_on ? 255 : 0);
+    return;
+  }
+
   int level = led_confirm_level(now_ms);
   if (level < 0) {
     level = touch_hold_led_level(now_ms);
@@ -436,6 +454,9 @@ void handle_command(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(action, "buzz") == 0) {
     const unsigned long duration_ms = doc["durationMs"] | 120UL;
+    if (doc["lightOn"] | false) {
+      set_relay(true, "alarm_light_on");
+    }
     pulse_buzzer(duration_ms);
     telemetry_dirty = true;
     queue_state("buzz", nullptr);
@@ -568,6 +589,37 @@ void poll_touch() {
 
   const unsigned long now = millis();
   const bool raw = read_touch_active();
+
+  if (raw != last_touch_raw) {
+    last_touch_raw = raw;
+    last_touch_raw_change_ms = now;
+  }
+
+  if (buzzer_active) {
+    if (!raw) {
+      if ((now - last_touch_raw_change_ms) < kTouchReleaseDebounceMs) {
+        return;
+      }
+      touch_active = false;
+      touch_release_stable_since_ms = now;
+      touch_armed = true;
+      telemetry_dirty = true;
+      queue_state("touch_release");
+      return;
+    }
+
+    touch_release_stable_since_ms = 0;
+    if ((now - last_touch_raw_change_ms) >= kAlarmTouchStopMs) {
+      touch_active = true;
+      touch_armed = false;
+      last_touch_toggle_ms = now;
+      stop_buzzer();
+      telemetry_dirty = true;
+      queue_state("alarm_touch_stop");
+      write_led();
+    }
+    return;
+  }
 
   if (now < touch_ignore_until_ms) {
     last_touch_raw = raw;

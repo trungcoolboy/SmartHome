@@ -377,7 +377,11 @@ class RelayScheduler:
             if runtime is None:
                 raise RuntimeError(f"node route not found: {alarm['routePrefix']}")
 
-            payload = {"action": "buzz", "durationMs": int(alarm["durationMs"])}
+            payload = {
+                "action": "buzz",
+                "durationMs": int(alarm["durationMs"]),
+                "lightOn": bool(alarm.get("lightOn")),
+            }
             self.schedule_store.mark_alarm_run(alarm_id, run_key)
             runtime.send_command(payload)
             if self.event_store is not None:
@@ -391,6 +395,7 @@ class RelayScheduler:
                         "alarmId": alarm_id,
                         "label": alarm.get("label"),
                         "durationMs": alarm.get("durationMs"),
+                        "lightOn": alarm.get("lightOn"),
                         "payload": payload,
                     },
                 )
@@ -861,7 +866,11 @@ class Handler(BaseHTTPRequestHandler):
                     payload = {"action": "stop_buzz"}
                 else:
                     duration_ms = max(1000, min(600000, int(body.get("durationMs", 30000))))
-                    payload = {"action": "buzz", "durationMs": duration_ms}
+                    payload = {
+                        "action": "buzz",
+                        "durationMs": duration_ms,
+                        "lightOn": bool(body.get("lightOn")),
+                    }
                 runtime.send_command(payload)
                 self._json(HTTPStatus.OK, {"ok": True, "sent": payload, "state": runtime.state.snapshot()})
                 return
@@ -879,6 +888,7 @@ class Handler(BaseHTTPRequestHandler):
                 route_prefix=route_prefix,
                 node_id=runtime.state.node_id,
                 duration_ms=int(body.get("durationMs", 30000)),
+                light_on=bool(body.get("lightOn")),
                 time_of_day=str(body["timeOfDay"]),
                 days=[int(day) for day in body.get("days", [0, 1, 2, 3, 4, 5, 6])],
                 timezone_offset_minutes=int(body.get("timezoneOffsetMinutes", 0)),
