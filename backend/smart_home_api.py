@@ -329,6 +329,8 @@ class RelayScheduler:
             channel = str(schedule["channel"])
             if command_type == "remote":
                 current_state = runtime.state.snapshot().get("remoteRelay")
+                if current_state is None:
+                    raise RuntimeError("remote relay state is unknown")
                 if current_state is not None and bool(current_state) == target_state:
                     self.schedule_store.mark_run(schedule_id, run_key)
                     return
@@ -1700,7 +1702,7 @@ def main() -> int:
     socket.setdefaulttimeout(15)
     stop_event = threading.Event()
     event_store = EventStore(args.event_db_path, retention_days=args.event_retention_days)
-    schedule_store = ScheduleStore(args.event_db_path)
+    schedule_store = ScheduleStore(Path(args.event_db_path).with_name("smart_home_schedules.sqlite3"))
 
     def _shutdown(signum: int, frame: Any) -> None:
         del signum, frame

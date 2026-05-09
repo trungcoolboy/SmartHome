@@ -487,12 +487,13 @@ button {
 
 .switch-panel-list {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
 .switch-panel-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
   padding: 16px 18px;
@@ -507,8 +508,10 @@ button {
 }
 
 .switch-led-block {
+  grid-column: 1 / -1;
   display: inline-flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
@@ -548,7 +551,7 @@ button {
 
 .switch-scheduler-form {
   display: grid;
-  grid-template-columns: minmax(110px, 150px) minmax(86px, 110px) auto;
+  grid-template-columns: minmax(112px, 1fr) minmax(82px, 104px) max-content;
   align-items: center;
   gap: 10px;
 }
@@ -564,7 +567,9 @@ button {
 }
 
 .switch-scheduler-form .ghost-pill {
+  justify-self: start;
   min-height: 38px;
+  min-width: 64px;
   padding: 0 16px;
 }
 
@@ -4357,9 +4362,14 @@ button {
   }
 
   .switch-panel-row {
+    grid-column: auto;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 12px;
     padding: 14px;
+  }
+
+  .switch-panel-list {
+    grid-template-columns: 1fr;
   }
 
   .switch-panel-meta {
@@ -4395,7 +4405,7 @@ button {
   }
 
   .switch-scheduler-form {
-    grid-template-columns: minmax(0, 1fr) minmax(82px, 0.65fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(82px, 0.65fr) max-content;
   }
 
   .ab-workspace-stats-panel,
@@ -4561,7 +4571,7 @@ button {
   }
 
   .switch-scheduler-form .ghost-pill {
-    width: 100%;
+    width: auto;
   }
 
   .tv-app-grid,
