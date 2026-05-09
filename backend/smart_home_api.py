@@ -34,6 +34,8 @@ BACKUP_TIMER_NAME = "smarthome-usb-backup.timer"
 BACKUP_ARCHIVE_DIR = Path("/mnt/smarthome-backup/smarthome-backups/ubuntu")
 BACKUP_LOG_PATH = Path("/var/log/smarthome-usb-backup.log")
 BACKUP_PROGRESS_PATH = Path("/run/smarthome-usb-backup-progress.json")
+LIVESTREAM_CONFIG_PATH = Path("/home/trungcoolboy/SmartHome/backend/state/livestream_youtube.json")
+LIVESTREAM_LOG_PATH = Path("/home/trungcoolboy/SmartHome/backend/state/livestream_ffmpeg.log")
 ROOM_NODE_CONFIGS = [
     ("/api/node/living-room-01", "living-room-node-01"),
     ("/api/node/living-room-02", "living-room-node-02"),
@@ -192,6 +194,211 @@ def build_backup_status() -> dict[str, Any]:
         "items": backups,
         "logs": log_lines,
     }
+
+
+class LivestreamManager:
+    DEFAULT_CONFIG: dict[str, Any] = {
+        "rtmpUrl": "rtmp://a.rtmp.youtube.com/live2",
+        "videoDevice": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_2EA9AABF-video-index0",
+        "audioDevice": "hw:2,0",
+        "audioMode": "webcam",
+        "resolution": "1280x720",
+        "framerate": 30,
+        "videoBitrateKbps": 3000,
+        "audioBitrateKbps": 128,
+    }
+
+    def __init__(self, config_path: Path, log_path: Path) -> None:
+        self.config_path = config_path
+        self.log_path = log_path
+        self.lock = threading.Lock()
+        self.process: subprocess.Popen[bytes] | None = None
+        self.started_at: float | None = None
+
+    def _load_config_unlocked(self) -> dict[str, Any]:
+        config = dict(self.DEFAULT_CONFIG)
+        try:
+            loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                config.update(loaded)
+        except (OSError, json.JSONDecodeError):
+            pass
+        return config
+
+    def _save_config_unlocked(self, config: dict[str, Any]) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
+        try:
+            os.chmod(self.config_path, 0o600)
+        except OSError:
+            pass
+
+    def _sanitize_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        sanitized = dict(config)
+        sanitized.pop("streamKey", None)
+        sanitized["streamKeySet"] = bool(config.get("streamKey"))
+        return sanitized
+
+    def _process_running_unlocked(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            config = self._load_config_unlocked()
+            running = self._process_running_unlocked()
+            return_code = None
+            pid = None
+            if self.process is not None:
+                return_code = self.process.poll()
+                pid = self.process.pid
+            return {
+                "serverTime": time.time(),
+                "running": running,
+                "pid": pid if running else None,
+                "returnCode": return_code,
+                "startedAt": self.started_at if running else None,
+                "config": self._sanitize_config(config),
+                "logPath": str(self.log_path),
+                "logs": tail_text_file(self.log_path, 80),
+            }
+
+    def save_config(self, updates: dict[str, Any]) -> dict[str, Any]:
+        allowed_keys = {
+            "rtmpUrl",
+            "streamKey",
+            "videoDevice",
+            "audioDevice",
+            "audioMode",
+            "resolution",
+            "framerate",
+            "videoBitrateKbps",
+            "audioBitrateKbps",
+        }
+        with self.lock:
+            config = self._load_config_unlocked()
+            for key in allowed_keys:
+                if key in updates and updates[key] not in (None, ""):
+                    config[key] = updates[key]
+            self._save_config_unlocked(config)
+        return self.status()
+
+    def _build_command(self, config: dict[str, Any]) -> list[str]:
+        stream_key = str(config.get("streamKey") or "").strip()
+        if not stream_key:
+            raise ValueError("YouTube stream key is missing")
+        rtmp_url = str(config.get("rtmpUrl") or self.DEFAULT_CONFIG["rtmpUrl"]).rstrip("/")
+        output_url = f"{rtmp_url}/{stream_key}"
+        resolution = str(config.get("resolution") or self.DEFAULT_CONFIG["resolution"])
+        framerate = int(config.get("framerate") or self.DEFAULT_CONFIG["framerate"])
+        video_bitrate = int(config.get("videoBitrateKbps") or self.DEFAULT_CONFIG["videoBitrateKbps"])
+        audio_bitrate = int(config.get("audioBitrateKbps") or self.DEFAULT_CONFIG["audioBitrateKbps"])
+        audio_mode = str(config.get("audioMode") or "webcam")
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-nostdin",
+            "-thread_queue_size",
+            "512",
+            "-f",
+            "v4l2",
+            "-input_format",
+            "mjpeg",
+            "-framerate",
+            str(framerate),
+            "-video_size",
+            resolution,
+            "-i",
+            str(config.get("videoDevice") or self.DEFAULT_CONFIG["videoDevice"]),
+        ]
+
+        if audio_mode == "webcam":
+            command.extend(
+                [
+                    "-thread_queue_size",
+                    "512",
+                    "-f",
+                    "alsa",
+                    "-i",
+                    str(config.get("audioDevice") or self.DEFAULT_CONFIG["audioDevice"]),
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=channel_layout=stereo:sample_rate=44100",
+                ]
+            )
+
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-tune",
+                "zerolatency",
+                "-pix_fmt",
+                "yuv420p",
+                "-b:v",
+                f"{video_bitrate}k",
+                "-maxrate",
+                f"{video_bitrate}k",
+                "-bufsize",
+                f"{video_bitrate * 2}k",
+                "-g",
+                str(max(1, framerate * 2)),
+                "-c:a",
+                "aac",
+                "-b:a",
+                f"{audio_bitrate}k",
+                "-ar",
+                "44100",
+                "-f",
+                "flv",
+                output_url,
+            ]
+        )
+        return command
+
+    def start(self, updates: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self.lock:
+            if self._process_running_unlocked():
+                raise RuntimeError("livestream is already running")
+            config = self._load_config_unlocked()
+            if updates:
+                for key, value in updates.items():
+                    if value not in (None, ""):
+                        config[key] = value
+                self._save_config_unlocked(config)
+            command = self._build_command(config)
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = self.log_path.open("ab")
+            log_handle.write(f"\n--- livestream start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n".encode("utf-8"))
+            log_handle.flush()
+            try:
+                self.process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, close_fds=True)
+            finally:
+                log_handle.close()
+            self.started_at = time.time()
+        return self.status()
+
+    def stop(self) -> dict[str, Any]:
+        with self.lock:
+            process = self.process
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        return self.status()
 
 
 @dataclass
@@ -831,6 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
     room_node_runtimes: dict[str, RoomNodeRuntime] = {}
     event_store: EventStore | None = None
     schedule_store: ScheduleStore | None = None
+    livestream_manager: LivestreamManager | None = None
     upload_dir: Path = Path("/tmp")
     stm32_status_cache_ttl_seconds = 0.5
     stm32_logs_cache_ttl_seconds = 0.75
@@ -868,6 +1076,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/backups":
             self._backups()
+            return
+        if parsed.path == "/api/livestream":
+            self._livestream()
             return
         if parsed.path == "/api/uploads":
             self._uploads()
@@ -968,6 +1179,49 @@ class Handler(BaseHTTPRequestHandler):
         if self.schedule_store is None:
             raise RuntimeError("Schedule store is not configured")
         return self.schedule_store
+
+    def _require_livestream_manager(self) -> LivestreamManager:
+        if self.livestream_manager is None:
+            raise RuntimeError("Livestream manager is not configured")
+        return self.livestream_manager
+
+    def _read_json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("expected JSON body") from exc
+        if not isinstance(body, dict):
+            raise ValueError("expected JSON object")
+        return body
+
+    def _livestream(self) -> None:
+        manager = self._require_livestream_manager()
+        if self.command == "GET":
+            self._json(HTTPStatus.OK, manager.status())
+            return
+        if self.command != "POST":
+            self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
+            return
+        try:
+            body = self._read_json_body()
+            action = str(body.get("action") or "save")
+            if action == "save":
+                self._json(HTTPStatus.OK, manager.save_config(body.get("config") if isinstance(body.get("config"), dict) else body))
+                return
+            if action == "start":
+                updates = body.get("config") if isinstance(body.get("config"), dict) else body
+                self._json(HTTPStatus.OK, manager.start(updates))
+                return
+            if action == "stop":
+                self._json(HTTPStatus.OK, manager.stop())
+                return
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown livestream action"})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), **manager.status()})
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc), **manager.status()})
 
     def _backups(self) -> None:
         if self.command == "GET":
@@ -2116,6 +2370,7 @@ def main() -> int:
     room_node_runtimes = build_room_node_runtimes(args, stop_event, event_store=event_store)
     relay_scheduler = RelayScheduler(schedule_store, room_node_runtimes, stop_event, event_store=event_store)
     relay_scheduler.start()
+    livestream_manager = LivestreamManager(LIVESTREAM_CONFIG_PATH, LIVESTREAM_LOG_PATH)
 
     Handler.tv_bridge = tv_bridge
     Handler.tv_state = tv_state
@@ -2124,6 +2379,7 @@ def main() -> int:
     Handler.room_node_runtimes = room_node_runtimes
     Handler.event_store = event_store
     Handler.schedule_store = schedule_store
+    Handler.livestream_manager = livestream_manager
     Handler.upload_dir = Path(args.upload_dir)
 
     server = SmartHomeApiServer((args.host, args.port), Handler)
@@ -2137,6 +2393,7 @@ def main() -> int:
             runtime.stop()
         for runtime in stm32_runtimes.values():
             runtime.bridge.stop()
+        livestream_manager.stop()
         schedule_store.close()
         event_store.close()
     return 0
