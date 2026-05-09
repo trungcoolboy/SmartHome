@@ -208,16 +208,14 @@ export const pageContent = {
   },
   "bedroom-2": {
     eyebrow: "Bedroom 2",
-    title: "Secondary bedroom controls with simple lighting and comfort states.",
-    description:
-      "This page should stay lightweight and fast, showing only the toggles and environment signals needed for daily use.",
+    hideHero: true,
     switchPanel: {
-      title: "Switch",
+      title: "Relay Control",
     },
     roomNode: {
       title: "Bedroom 2 Node 01",
       apiPath: "/api/node/bedroom-2-01",
-      relays: [{ key: "relay", label: "Relay" }],
+      relays: [{ key: "relay", label: "Relay", displayLabel: "Bedroom 2 Relay" }],
       touches: [{ key: "touch", label: "Touch" }],
       ledModes: [
         { key: "auto", label: "Auto" },
@@ -241,20 +239,6 @@ export const pageContent = {
       remoteRelayToggleAction: { action: "toggle_remote" },
       remoteRelaySyncAction: { action: "sync_remote" },
     },
-    highlights: [
-      {
-        title: "Devices",
-        items: ["Ceiling light", "Desk lamp", "Wall socket", "Temperature sensor"],
-      },
-      {
-        title: "Scenes",
-        items: ["Study mode", "Night mode", "Away mode", "All off"],
-      },
-      {
-        title: "Realtime Layer",
-        items: ["Occupancy state", "Node connection health", "Recent automation events"],
-      },
-    ],
   },
   "bathroom-1": {
     eyebrow: "Bathroom 1",

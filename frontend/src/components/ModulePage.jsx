@@ -4387,6 +4387,12 @@ function ModulePage({ page, alertFeed }) {
         </>
       ) : null}
 
+      {!page.featuredDevice && page.switchPanel ? (
+        <section className="tv-control-grid">
+          {renderSwitchPanelCard()}
+        </section>
+      ) : null}
+
       {page.pinoutsCard ? (
         <section
           ref={(element) => {

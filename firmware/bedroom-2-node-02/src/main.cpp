@@ -24,8 +24,21 @@ enum class LedDrive : uint8_t {
   Red,
   Green,
 };
+enum class LedMode : uint8_t {
+  Auto,
+  On,
+  Off,
+  Breathe,
+  BlinkSlow,
+  BlinkFast,
+  DoubleBlink,
+  Heartbeat,
+  Pulse,
+  Candle,
+};
 LedDrive led_drive = LedDrive::Off;
 LedDrive led_override_drive = LedDrive::Off;
+LedMode led_mode = LedMode::Auto;
 unsigned long led_override_until_ms = 0;
 uint8_t probe_pin = 255;
 LedDrive probe_drive = LedDrive::Off;
@@ -65,6 +78,7 @@ constexpr unsigned long kTouchIgnoreAfterRemoteSyncMs = 1200;
 constexpr unsigned long kTouchRearmReleaseStableMs = 900;
 constexpr unsigned long kLedConfirmOffMs = 80;
 constexpr unsigned long kLedConfirmFullMs = 260;
+constexpr unsigned long kLedBreathPeriodMs = 2200;
 constexpr bool kTouchControlEnabled = true;
 
 bool read_touch_active() {
@@ -114,6 +128,76 @@ bool parse_led_drive(const char* value, LedDrive& drive) {
   return false;
 }
 
+const char* led_mode_name(LedMode mode) {
+  switch (mode) {
+    case LedMode::On:
+      return "on";
+    case LedMode::Off:
+      return "off";
+    case LedMode::Breathe:
+      return "breathe";
+    case LedMode::BlinkSlow:
+      return "blink_slow";
+    case LedMode::BlinkFast:
+      return "blink_fast";
+    case LedMode::DoubleBlink:
+      return "double_blink";
+    case LedMode::Heartbeat:
+      return "heartbeat";
+    case LedMode::Pulse:
+      return "pulse";
+    case LedMode::Candle:
+      return "candle";
+    case LedMode::Auto:
+    default:
+      return "auto";
+  }
+}
+
+bool parse_led_mode(const char* value, LedMode& mode) {
+  if (strcmp(value, "auto") == 0) {
+    mode = LedMode::Auto;
+    return true;
+  }
+  if (strcmp(value, "on") == 0) {
+    mode = LedMode::On;
+    return true;
+  }
+  if (strcmp(value, "off") == 0) {
+    mode = LedMode::Off;
+    return true;
+  }
+  if (strcmp(value, "breathe") == 0) {
+    mode = LedMode::Breathe;
+    return true;
+  }
+  if (strcmp(value, "blink_slow") == 0) {
+    mode = LedMode::BlinkSlow;
+    return true;
+  }
+  if (strcmp(value, "blink_fast") == 0) {
+    mode = LedMode::BlinkFast;
+    return true;
+  }
+  if (strcmp(value, "double_blink") == 0) {
+    mode = LedMode::DoubleBlink;
+    return true;
+  }
+  if (strcmp(value, "heartbeat") == 0) {
+    mode = LedMode::Heartbeat;
+    return true;
+  }
+  if (strcmp(value, "pulse") == 0) {
+    mode = LedMode::Pulse;
+    return true;
+  }
+  if (strcmp(value, "candle") == 0) {
+    mode = LedMode::Candle;
+    return true;
+  }
+  return false;
+}
+
 void write_led_drive(LedDrive drive) {
   led_drive = drive;
   const int level = drive == LedDrive::Red ? 255 : 0;
@@ -126,6 +210,47 @@ void write_led_level(int level) {
   led_drive = constrained_level > 0 ? LedDrive::Red : LedDrive::Off;
   pinMode(NodeConfig::kLedPin, OUTPUT);
   analogWrite(NodeConfig::kLedPin, NodeConfig::kLedActiveHigh ? constrained_level : (255 - constrained_level));
+}
+
+int current_led_level() {
+  const unsigned long now_ms = millis();
+  switch (led_mode) {
+    case LedMode::On:
+      return 255;
+    case LedMode::Off:
+      return 0;
+    case LedMode::Breathe:
+    case LedMode::Pulse: {
+      const unsigned long period = led_mode == LedMode::Pulse ? 1800 : kLedBreathPeriodMs;
+      const unsigned long phase = now_ms % period;
+      const float half_period = period / 2.0f;
+      float ratio = phase <= half_period ? (phase / half_period) : ((period - phase) / half_period);
+      ratio = led_mode == LedMode::Pulse ? (0.04f + (0.96f * ratio)) : (0.12f + (0.88f * ratio));
+      return static_cast<int>(ratio * 255.0f);
+    }
+    case LedMode::BlinkSlow:
+      return ((now_ms / 700) % 2) ? 255 : 0;
+    case LedMode::BlinkFast:
+      return ((now_ms / 180) % 2) ? 255 : 0;
+    case LedMode::DoubleBlink: {
+      const unsigned long phase = now_ms % 1400;
+      return (phase < 120 || (phase >= 240 && phase < 360)) ? 255 : 0;
+    }
+    case LedMode::Heartbeat: {
+      const unsigned long phase = now_ms % 1500;
+      return (phase < 90 || (phase >= 140 && phase < 230)) ? 255 : 0;
+    }
+    case LedMode::Candle: {
+      const unsigned long phase = now_ms % 997;
+      const int base = 150 + static_cast<int>((phase * 73UL) % 70);
+      const int dip = (phase % 173 < 20) ? 60 : 0;
+      const int level = base - dip;
+      return level < 0 ? 0 : (level > 255 ? 255 : level);
+    }
+    case LedMode::Auto:
+    default:
+      return remote_relay_on ? 255 : 0;
+  }
 }
 
 void release_probe_pin() {
@@ -232,7 +357,7 @@ void update_led() {
     write_led_drive(LedDrive::Red);
     return;
   }
-  write_led_level(remote_relay_on ? 255 : 0);
+  write_led_level(current_led_level());
 }
 
 bool publish_availability(const char* value) {
@@ -263,6 +388,7 @@ bool publish_state_now(const char* event, const char* detail = nullptr) {
   doc["touchPin"] = NodeConfig::kTouchPin;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
+  doc["ledMode"] = led_mode_name(led_mode);
   doc["ledPin"] = NodeConfig::kLedPin;
   if (probe_pin != 255) {
     doc["probePin"] = probe_pin;
@@ -299,6 +425,7 @@ bool publish_telemetry_now() {
   doc["touchPin"] = NodeConfig::kTouchPin;
   doc["remoteRelay"] = remote_relay_on;
   doc["led"] = led_drive_name(led_drive);
+  doc["ledMode"] = led_mode_name(led_mode);
   doc["ledPin"] = NodeConfig::kLedPin;
   if (probe_pin != 255) {
     doc["probePin"] = probe_pin;
@@ -520,6 +647,21 @@ void handle_command(char* topic, const uint8_t* payload, unsigned int length) {
     telemetry_dirty = true;
     return;
   }
+  if (strcmp(action, "set_led_mode") == 0) {
+    LedMode next_mode = led_mode;
+    const char* mode = doc["mode"] | "";
+    if (!parse_led_mode(mode, next_mode)) {
+      queue_state("bad_led_mode", mode);
+      telemetry_dirty = true;
+      return;
+    }
+    led_mode = next_mode;
+    led_override_until_ms = 0;
+    update_led();
+    queue_state("led_mode_updated", led_mode_name(led_mode));
+    telemetry_dirty = true;
+    return;
+  }
   if (strcmp(action, "probe_led_pin") == 0) {
     const int pin = doc["pin"] | -1;
     if (!is_probe_pin_allowed(static_cast<uint8_t>(pin))) {
@@ -618,13 +760,14 @@ void init_gpio() {
 }
 
 void status_log() {
-  Serial.printf("wifi=%s ip=%s rssi=%d mqtt=%s remoteRelay=%s touch=%s\n",
+  Serial.printf("wifi=%s ip=%s rssi=%d mqtt=%s remoteRelay=%s touch=%s ledMode=%s\n",
                 WiFi.status() == WL_CONNECTED ? "up" : "down",
                 WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "0.0.0.0",
                 WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                 mqtt_client.connected() ? "up" : "down",
                 remote_relay_on ? "on" : "off",
-                touch_active ? "on" : "off");
+                touch_active ? "on" : "off",
+                led_mode_name(led_mode));
 }
 
 }  // namespace
