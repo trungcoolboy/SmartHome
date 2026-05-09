@@ -238,13 +238,24 @@ export const pageContent = {
       remoteRelayLabel: "Remote Relay",
       remoteRelayToggleAction: { action: "toggle_remote" },
       remoteRelaySyncAction: { action: "sync_remote" },
+      ledModeScopedByRelay: false,
+      ledModes: [
+        { key: "auto", label: "Auto" },
+        { key: "on", label: "On" },
+        { key: "off", label: "Off" },
+        { key: "breathe", label: "Breathe" },
+        { key: "blink_slow", label: "Blink Slow" },
+        { key: "blink_fast", label: "Blink Fast" },
+        { key: "double_blink", label: "Double Blink" },
+        { key: "heartbeat", label: "Heartbeat" },
+        { key: "pulse", label: "Pulse" },
+        { key: "candle", label: "Candle" },
+      ],
     },
   },
   "bathroom-1": {
     eyebrow: "Bathroom 1",
-    title: "Bathroom controls for lights, local relays and hot water.",
-    description:
-      "Node 01 handles the wall touch panel and two local relays. Node 02 drives the hot-water relay, status LED, touch input and buzzer.",
+    hideHero: true,
     switchPanel: {
       title: "Switch",
     },
@@ -260,6 +271,10 @@ export const pageContent = {
         { key: "relay2", label: "Touch 2" },
         { key: "touch3", label: "Remote Touch" },
       ],
+      remoteRelayLabel: "Remote Hot Water Touch",
+      remoteRelayLedKey: "touch3",
+      remoteRelayCommandNodeKind: "secondary",
+      remoteRelayCommandKey: "relay",
       ledModes: [
         { key: "auto", label: "Auto" },
         { key: "on", label: "On" },
@@ -278,20 +293,6 @@ export const pageContent = {
       ],
       ledModeScopedByRelay: false,
     },
-    highlights: [
-      {
-        title: "Devices",
-        items: ["Relay 1", "Relay 2", "Remote hot-water touch", "Hot-water relay and buzzer"],
-      },
-      {
-        title: "Remote Link",
-        items: ["Touch 3 on node 1 toggles node 2", "LED 3 follows hot-water relay", "Dashboard can control node 2 directly"],
-      },
-      {
-        title: "Realtime Layer",
-        items: ["Node 1 touch states", "Node 2 relay state", "MQTT availability and RSSI"],
-      },
-    ],
   },
   "bathroom-2": {
     eyebrow: "Bathroom 2",

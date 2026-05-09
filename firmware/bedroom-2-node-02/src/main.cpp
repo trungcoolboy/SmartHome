@@ -738,7 +738,9 @@ void ensure_mqtt() {
 
 void setup_ota() {
   ArduinoOTA.setHostname(NodeConfig::kOtaHostname);
-  ArduinoOTA.setPassword(NodeConfig::kOtaPassword);
+  if (NodeConfig::kOtaPassword[0] != '\0') {
+    ArduinoOTA.setPassword(NodeConfig::kOtaPassword);
+  }
   ArduinoOTA.begin();
 }
 

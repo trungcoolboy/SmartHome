@@ -2575,6 +2575,22 @@ function ModulePage({ page, alertFeed }) {
               : (roomNodeState?.ledModes?.[relay.key] ?? "auto"),
         }))
       : []),
+    ...(page.switchPanel && page.roomNode?.remoteRelayLabel
+      ? [
+          {
+            id: "primary-remote-relay",
+            label: `${page.roomNode.title} ${page.roomNode.remoteRelayLabel}`,
+            nodeKind: "primary",
+            commandNodeKind: page.roomNode.remoteRelayCommandNodeKind ?? "secondary",
+            relayKey: page.roomNode.remoteRelayLedKey ?? "touch3",
+            relayCommandKey: page.roomNode.remoteRelayCommandKey ?? "relay",
+            commandType: page.roomNode.remoteRelayCommandType ?? "relay",
+            relayOn: Boolean(roomNodeState?.remoteRelay),
+            ledModes: page.roomNode.remoteRelayLedModes ?? page.roomNode.ledModes ?? [],
+            ledMode: roomNodeState?.ledModes?.[page.roomNode.remoteRelayLedKey ?? "touch3"] ?? "auto",
+          },
+        ]
+      : []),
     ...(page.switchPanel && page.roomNodeSecondary
       ? (page.roomNodeSecondary.relays ?? []).map((relay) => ({
           id: `secondary-${relay.key}`,
@@ -2599,8 +2615,8 @@ function ModulePage({ page, alertFeed }) {
             relayKey: "remoteRelay",
             commandType: "remote",
             relayOn: Boolean(roomNodeSecondaryState?.remoteRelay),
-            ledModes: [],
-            ledMode: "auto",
+            ledModes: page.roomNodeSecondary.remoteRelayLedModes ?? page.roomNodeSecondary.ledModes ?? [],
+            ledMode: roomNodeSecondaryState?.ledMode ?? "auto",
           },
         ]
       : []),
@@ -3627,7 +3643,12 @@ function ModulePage({ page, alertFeed }) {
                   type="checkbox"
                   checked={item.relayOn}
                   onChange={(event) =>
-                    setSwitchRelay(item.nodeKind, item.relayKey, event.target.checked, item.commandType)
+                    setSwitchRelay(
+                      item.commandNodeKind ?? item.nodeKind,
+                      item.relayCommandKey ?? item.relayKey,
+                      event.target.checked,
+                      item.commandType,
+                    )
                   }
                 />
                 <span className="ios-toggle-track" />
@@ -3639,8 +3660,8 @@ function ModulePage({ page, alertFeed }) {
                     type="button"
                     onClick={() =>
                       setSwitchLedMode(
-                        item.nodeKind,
-                        item.relayKey,
+                        item.ledNodeKind ?? item.nodeKind,
+                        item.ledKey ?? item.relayKey,
                         item.ledIsOn ? "off" : "on",
                       )
                     }
@@ -3649,7 +3670,9 @@ function ModulePage({ page, alertFeed }) {
                     <button
                       className={item.ledIsAuto ? "active" : ""}
                       type="button"
-                      onClick={() => setSwitchLedMode(item.nodeKind, item.relayKey, "auto")}
+                      onClick={() =>
+                        setSwitchLedMode(item.ledNodeKind ?? item.nodeKind, item.ledKey ?? item.relayKey, "auto")
+                      }
                     >
                       Auto
                     </button>
@@ -3658,8 +3681,8 @@ function ModulePage({ page, alertFeed }) {
                       type="button"
                       onClick={() =>
                         setSwitchLedMode(
-                          item.nodeKind,
-                          item.relayKey,
+                          item.ledNodeKind ?? item.nodeKind,
+                          item.ledKey ?? item.relayKey,
                           item.ledMode === "off" || item.ledMode === "auto" ? "on" : item.ledMode,
                         )
                       }
@@ -3680,7 +3703,9 @@ function ModulePage({ page, alertFeed }) {
                         key={`${item.id}-${mode.key}`}
                         className={`source-chip ${item.ledMode === mode.key ? "active" : ""}`}
                         type="button"
-                        onClick={() => setSwitchLedMode(item.nodeKind, item.relayKey, mode.key)}
+                        onClick={() =>
+                          setSwitchLedMode(item.ledNodeKind ?? item.nodeKind, item.ledKey ?? item.relayKey, mode.key)
+                        }
                       >
                         {mode.label}
                       </button>
