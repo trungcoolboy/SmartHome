@@ -369,6 +369,62 @@ button {
   margin-top: 14px;
 }
 
+.backup-progress-block {
+  margin-top: 14px;
+}
+
+.backup-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 8px;
+  color: #eef8ff;
+  font-weight: 800;
+}
+
+.backup-progress-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-progress-head strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.backup-progress-meter,
+.backup-usage-meter {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid rgba(160, 216, 238, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.backup-progress-meter span,
+.backup-usage-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #77e0cf, #75e39a);
+  transition: width 220ms ease;
+}
+
+.backup-usage-meter {
+  margin-top: 14px;
+}
+
+.backup-usage-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
 .backup-ok {
   color: #75e39a;
 }
