@@ -373,6 +373,16 @@ button {
   margin-top: 14px;
 }
 
+.backup-progress-card {
+  border-color: rgba(117, 227, 154, 0.32);
+}
+
+.backup-progress-percent {
+  color: #75e39a;
+  font-size: 1.45rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .backup-progress-head {
   display: flex;
   align-items: center;
@@ -409,6 +419,11 @@ button {
   border-radius: inherit;
   background: linear-gradient(90deg, #77e0cf, #75e39a);
   transition: width 220ms ease;
+}
+
+.backup-progress-meter-large {
+  height: 18px;
+  margin-top: 8px;
 }
 
 .backup-usage-meter {
